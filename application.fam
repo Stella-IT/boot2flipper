@@ -2,8 +2,8 @@
 # https://developer.flipper.net/flipperzero/doxygen/app_manifests.html
 
 App(
-    appid="demo_app",  # Must be unique
-    name="Demo Application",  # Displayed in UI
+    appid="boot2flipper",  # Must be unique
+    name="Boot to Flipper",  # Displayed in UI
     apptype=FlipperAppType.EXTERNAL,
     entry_point="entrypoint",
     stack_size=2 * 1024, # size of memory stack it will allocate
@@ -25,8 +25,8 @@ App(
     fap_description="A simple app for demonstration",
     fap_version="1.0",  # (major, minor)
     fap_icon="icon.png",  # 10x10 1-bit PNG
-    fap_author="Alex4386",
-    fap_weburl="https://github.com/Alex4386/f0-template",
+    fap_author="Stella IT Inc.",
+    fap_weburl="https://github.com/Stella-IT/boot2flipper",
     fap_icon_assets="icons",  # Image assets to compile for this application
                               # available as {appid}_icons.h in the source code
 )
