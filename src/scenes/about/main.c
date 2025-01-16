@@ -2,7 +2,7 @@
 #include <gui/modules/submenu.h>
 #include "../../main.h"
 #include "main.h"
-#include <demo_app_icons.h>
+#include <boot2flipper_icons.h>
 
 #define THIS_SCENE About
 
