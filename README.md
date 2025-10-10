@@ -4,6 +4,17 @@
 > [!WARNING]
 > This application is not an official Stella IT product. Use at your own risk.
 
+## Build Status
+
+<!-- Replace the https://github.com/Alex4386/f0-template to your own repo after using template! -->
+
+- **Latest Release**: [Download](https://github.com/Stella-IT/boot2flipper/releases/latest)
+- **Latest Nightly**: [Download](https://github.com/Stella-IT/boot2flipper/actions/workflows/nightly.yml) _(GitHub Login Required)_
+
+|                                            Nightly Build                                            |                                            Release Build                                            |
+| :-------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------: |
+| ![Nightly Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/nightly.yml/badge.svg) | ![Release Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/release.yml/badge.svg) |
+
 ## What is this?
 Boot2Flipper is an application for Flipper Zero that allows you to emulate a iPXE USB thumb drive.  
 
@@ -15,12 +26,13 @@ Boot2Flipper is an application for Flipper Zero that allows you to emulate a iPX
 * Config Load/Save to/from SD card
 * Support for custom iPXE EFI executable
 
-### How does it work?
+## How does it work?
 Boot2Flipper emulates a USB Mass Storage device with "virtual" FAT32 filesystem.
 The Boot2Flipper application generates FAT32 File Allocation Table and `autoexec.ipxe` script and iPXE EFI Executable on the fly, with MBR of iPXE.  
 
 When the file itself is requested, Boot2Flipper automatically calculates the offset from the each file's cluster number and returns the file content from the underlying flipper filesystem.  
 
+## Usage
 ### How to setup iPXE files?
 1. Install Boot2Flipper on your Flipper Zero
 2. Open `Boot2Flipper` application on your Flipper Zero
@@ -44,17 +56,6 @@ When the file itself is requested, Boot2Flipper automatically calculates the off
 9. On your PC, Select Boot Device labelled as `FLIPPER Boot2Flipper 1.0` or similar.
 10. Your Flipper Zero will report as it is reading `ipxe.lkrn` or `bootx64.efi` file., due to flipper zero's limitation, it will take some time to read and send the file to PC.
 11. Congratulations, You'll see iPXE booting up on your PC!
-
-## Build Status
-
-<!-- Replace the https://github.com/Alex4386/f0-template to your own repo after using template! -->
-
-- **Latest Release**: [Download](https://github.com/Stella-IT/boot2flipper/releases/latest)
-- **Latest Nightly**: [Download](https://github.com/Stella-IT/boot2flipper/actions/workflows/nightly.yml) _(GitHub Login Required)_
-
-|                                            Nightly Build                                            |                                            Release Build                                            |
-| :-------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------: |
-| ![Nightly Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/nightly.yml/badge.svg) | ![Release Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/release.yml/badge.svg) |
 
 ## Setup Development Environment
 See [DEVELOPMENT.md](DEVELOPMENT.md) to see how to setup your development environment.
