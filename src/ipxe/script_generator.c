@@ -1,4 +1,5 @@
 #include "script_generator.h"
+#include <string.h>
 
 #define TAG "iPXEScript"
 
@@ -34,6 +35,11 @@ FuriString* ipxe_script_generate_dhcp(
         furi_string_cat_printf(script, "echo DNS: ${%s/dns}\n", iface);
     } else {
         furi_string_cat_printf(script, "dhcp || goto failed\n");
+        furi_string_cat_printf(script, "\n");
+        furi_string_cat_printf(script, "echo Network configured:\n");
+        furi_string_cat_printf(script, "echo IP: ${ip}\n");
+        furi_string_cat_printf(script, "echo Gateway: ${gateway}\n");
+        furi_string_cat_printf(script, "echo DNS: ${dns}\n");
     }
     furi_string_cat_printf(script, "\n");
 
@@ -49,7 +55,7 @@ FuriString* ipxe_script_generate_dhcp(
 
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, ":failed\n");
-    furi_string_cat_printf(script, "echo Dropping to shell\n");
+    furi_string_cat_printf(script, "echo Failed. Dropping to shell\n");
     furi_string_cat_printf(script, "shell\n");
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, ":end\n");
@@ -127,7 +133,7 @@ FuriString* ipxe_script_generate_static(
 
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, ":failed\n");
-    furi_string_cat_printf(script, "echo Dropping to shell\n");
+    furi_string_cat_printf(script, "echo Failed. Dropping to shell\n");
     furi_string_cat_printf(script, "shell\n");
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, ":end\n");
