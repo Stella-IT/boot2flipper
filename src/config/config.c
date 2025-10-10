@@ -12,7 +12,7 @@ Boot2FlipperConfig* config_alloc() {
     config->gateway = furi_string_alloc_set("192.168.1.1");
     config->dns = furi_string_alloc_set("8.8.8.8");
     config->chainload_url = furi_string_alloc_set("http://boot.ipxe.org/demo/boot.php");
-    config->network_interface = furi_string_alloc_set("net0");
+    config->network_interface = furi_string_alloc_set("auto"); // Default: auto-detect
     config->partition_scheme = PARTITION_SCHEME_GPT_ONLY; // Default: GPT (UEFI)
     config->chainload_enabled = true; // Default: chainloading enabled
 

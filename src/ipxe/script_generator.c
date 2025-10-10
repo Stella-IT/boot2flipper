@@ -13,6 +13,11 @@ FuriString* ipxe_script_generate_dhcp(
     bool has_interface = (network_interface && network_interface[0]);
     const char* iface = has_interface ? network_interface : "net0";
 
+    if (!has_interface || strcmp(iface, "auto") == 0) {
+        iface = ""; // Empty string for auto-detect
+        has_interface = false;
+    }
+
     // iPXE script for DHCP mode
     furi_string_cat_printf(script, "#!ipxe\n");
     furi_string_cat_printf(script, "# Boot2Flipper - DHCP Mode\n");
@@ -77,7 +82,11 @@ FuriString* ipxe_script_generate_static(
     FuriString* script = furi_string_alloc();
 
     // Use default if network_interface is NULL
-    const char* iface = (network_interface && network_interface[0]) ? network_interface : "net0";
+    const char* iface = has_interface ? network_interface : "net0";
+
+    if (!has_interface || strcmp(iface, "auto") == 0) {
+        iface = "net0";
+    }
 
     // Calculate netmask bits from subnet mask (e.g., 255.255.255.0 -> 24)
     // For simplicity, we'll use the dotted notation directly
