@@ -82,6 +82,7 @@ FuriString* ipxe_script_generate_static(
     FuriString* script = furi_string_alloc();
 
     // Use default if network_interface is NULL
+    bool has_interface = (network_interface && network_interface[0]);
     const char* iface = has_interface ? network_interface : "net0";
 
     if (!has_interface || strcmp(iface, "auto") == 0) {
