@@ -1,12 +1,49 @@
-<h1 align="center">Flipper Zero: Application Template</h1>
+<h1 align="center">boot2flipper</h1>
+<p align="center">Use your Flipper Zero as PXE Recovery Disk</p>
 
-## How to use this template
+> [!WARNING]
+> This application is not an official Stella IT product. Use at your own risk.
 
-1. Setup the repository by clicking the `Use this template` button on the top of the repository. Fill in the data if needed.
-2. Update `README.md`'s upstream url with your repository's url.
-3. Add `LICENSE` file with your own license.
-4. Continue on [Setup Build environment](#setup-build-environment).
-5. Change `AppID`
+## What is this?
+Boot2Flipper is an application for Flipper Zero that allows you to emulate a iPXE USB thumb drive.  
+
+## Features
+* Automatic `autoexec.ipxe` script generation
+  - Configure IP address, netmask, gateway and DNS server on your Flipper Zero
+  - Automatically chainload to specified URL
+* UEFI and Legacy BIOS support
+* Config Load/Save to/from SD card
+* Support for custom iPXE EFI executable
+
+### How does it work?
+Boot2Flipper emulates a USB Mass Storage device with "virtual" FAT32 filesystem.
+The Boot2Flipper application generates FAT32 File Allocation Table and `autoexec.ipxe` script and iPXE EFI Executable on the fly, with MBR of iPXE.  
+
+When the file itself is requested, Boot2Flipper automatically calculates the offset from the each file's cluster number and returns the file content from the underlying flipper filesystem.  
+
+### How to setup iPXE files?
+1. Install Boot2Flipper on your Flipper Zero
+2. Open `Boot2Flipper` application on your Flipper Zero
+3. Open `qFlipper` or other file transfer application (e.g. [`f0-mtp`](https://github.com/Alex4386/f0-mtp))
+4. Head to `SD Card` -> `apps_data` -> `boot2flipper`
+5. Create `ipxe` directory
+6. Download `ipxe.efi` and `ipxe.lkrn` files from [boot.ipxe.org](https://boot.ipxe.org) and put them into `ipxe` directory
+
+### How to use Boot2Flipper?
+1. Open `Boot2Flipper` application on your Flipper Zero
+2. (Optional) Load configuration from SD card
+3. Configure Network (DHCP or Static IP)
+4. (Static IP only) 
+   1. configure IP address, netmask, gateway and DNS server at `NetworkSettings` menu.
+   2. (Static IP Only) Configure Network Interface other than `auto` (If it is left to `auto`, it will automatically use `net0` interface)
+5. Select `Boot Method`. `MBR` or `UEFI`
+6. If you want to drop to iPXE shell, Set Chainload to `Disabled`.
+   1. Else, Set the ChainloadURL to your desired URL.
+7. (Optional) Save configuration to SD card
+8. Press `Start` button to start emulating USB Mass Storage device
+9. On your PC, Select Boot Device labelled as `FLIPPER Boot2Flipper 1.0` or similar.
+10. Your Flipper Zero will report as it is reading `ipxe.lkrn` or `bootx64.efi` file., due to flipper zero's limitation, it will take some time to read and send the file to PC.
+11. Congratulations, You'll see iPXE booting up on your PC!
 
 ## Build Status
 
@@ -19,39 +56,11 @@
 | :-------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------------------------------: |
 | ![Nightly Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/nightly.yml/badge.svg) | ![Release Build](https://github.com/Stella-IT/boot2flipper/actions/workflows/release.yml/badge.svg) |
 
-## Setup Build environment
+## Setup Development Environment
+See [DEVELOPMENT.md](DEVELOPMENT.md) to see how to setup your development environment.
 
-### Build Instruction
+## FAQ
+1. **Why didn't you use other sizes less than `128MB`?**  
+   This is due to some BIOSes not respecting `ESP` partition sizes that are less than `100MB`.
+   This is a known issue with some UEFI implementations. Due to this, if you have Debug logging enabled in Flipper Zero, initial FAT32 FAT scan may take a while. So either disable Debug logging or wait.
 
-1. Install `ufbt`:
-   ```bash
-   pip3 install ufbt
-   ```
-2. Clone this repository and enter the repository root.
-3. Run `ufbt update` to update the SDK for your flipper
-   - If you are using custom firmware, You should switch SDK. Here is the example for `unleashed` firmware:
-     ```bash
-     ufbt update --index-url=https://up.unleashedflip.com/directory.json
-     ```
-   - If you want to use different release channel, You can run update to that channel too. Here is the example for `dev` channel (`dev`, `rc`, `release` are supported):
-     ```bash
-     ufbt update --channel=dev
-     ```
-4. Run `ufbt` in the repository root:
-   ```bash
-   ufbt
-   ```
-5. Compiled binary is now available at `./dist/` directory.
-
-### Setup Visual Studio Code
-
-> [!WARNING]
-> This command will overwrite your `.vscode` directory and `.gitignore` on your root directory.
-> **Make sure to backup your changes before running this command.**
-
-1. Suppose your build environment is ready.
-2. Run `ufbt vscode_dist` to generate Visual Studio Code config.
-
-### What Next?
-
-See [KICKSTART.md](KICKSTART.md) to see how to start building and setting up the repo for the first time! (This includes changing `AppID` and required steps to make your app **WORK**)

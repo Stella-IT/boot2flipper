@@ -17,12 +17,14 @@ App(
 
     # Dependencies
     requires=[
-
+      "gui",
+      "storage",
+      "dialogs"
     ],
 
     # FAP Settings
-    fap_category="Tools",
-    fap_description="A simple app for demonstration",
+    fap_category="USB",
+    fap_description="Rescue your PC with iPXE/PXE boot via Flipper Zero.",
     fap_version="1.0",  # (major, minor)
     fap_icon="icon.png",  # 10x10 1-bit PNG
     fap_author="Stella IT Inc.",

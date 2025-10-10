@@ -2,15 +2,27 @@
 
 #include <gui/scene_manager.h>
 #include <gui/view_dispatcher.h>
-#include "scenes/import.h"
+#include <dialogs/dialogs.h>
+#include <gui/gui.h>
+#include <storage/storage.h>
 
-#define APP_NAME "DemoApp"
+#include "scenes/import.h"
+#include "config/config.h"
+
+#define APP_NAME "Boot2Flipper"
 
 typedef struct App {
+    Gui* gui;
+    Storage* storage;
+    DialogsApp* dialogs;
+
     SceneManager* scene_manager;
     ViewDispatcher* view_dispatcher;
 
     void** allocated_scenes;
+
+    FuriString* config_file;
+    Boot2FlipperConfig* config;
 } App;
 
 /**
@@ -29,3 +41,4 @@ typedef enum {
  */
 bool scene_handler_event_forwarder(void* context, uint32_t event_id);
 bool scene_handler_navigation_forwarder(void* context);
+void scene_handler_tick_forwarder(void* context);

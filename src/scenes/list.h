@@ -14,3 +14,5 @@
 
 SCENE_ACTION(Home)
 SCENE_ACTION(About)
+SCENE_ACTION(NetworkSettings)
+SCENE_ACTION(UsbMassStorage)

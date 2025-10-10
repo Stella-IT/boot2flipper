@@ -17,3 +17,11 @@ bool scene_handler_navigation_forwarder(void* context) {
 
     return scene_manager_handle_back_event(app->scene_manager);
 }
+void scene_handler_tick_forwarder(void* context) {
+    App* app = (App*)context;
+    if(app == NULL || app->scene_manager == NULL) {
+        return;
+    }
+
+    return scene_manager_handle_tick_event(app->scene_manager);
+}
