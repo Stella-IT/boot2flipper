@@ -14,7 +14,7 @@ FuriString* ipxe_script_generate_dhcp(
     bool has_interface = (network_interface && network_interface[0]);
     const char* iface = has_interface ? network_interface : "net0";
 
-    if (!has_interface || strcmp(iface, "auto") == 0) {
+    if(!has_interface || strcmp(iface, "auto") == 0) {
         iface = ""; // Empty string for auto-detect
         has_interface = false;
     }
@@ -91,7 +91,7 @@ FuriString* ipxe_script_generate_static(
     bool has_interface = (network_interface && network_interface[0]);
     const char* iface = has_interface ? network_interface : "net0";
 
-    if (!has_interface || strcmp(iface, "auto") == 0) {
+    if(!has_interface || strcmp(iface, "auto") == 0) {
         iface = "net0";
     }
 
