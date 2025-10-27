@@ -4,6 +4,8 @@
 > [!WARNING]
 > This application is not an official Stella IT product. Use at your own risk.
 
+<img width="512" height="256" alt="image" src="https://github.com/user-attachments/assets/23bf9f66-be95-4793-a1d9-358d6f1708bc" />
+
 ## Build Status
 
 <!-- Replace the https://github.com/Alex4386/f0-template to your own repo after using template! -->
