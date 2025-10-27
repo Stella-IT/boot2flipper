@@ -1,10 +1,11 @@
 <h1 align="center">boot2flipper</h1>
 <p align="center">Use your Flipper Zero as PXE Recovery Disk</p>
+<p align="center">
+  <img width="512" height="256" alt="image" src="https://github.com/user-attachments/assets/23bf9f66-be95-4793-a1d9-358d6f1708bc" />
+</p>
 
 > [!WARNING]
 > This application is not an official Stella IT product. Use at your own risk.
-
-<img width="512" height="256" alt="image" src="https://github.com/user-attachments/assets/23bf9f66-be95-4793-a1d9-358d6f1708bc" />
 
 ## Build Status
 
