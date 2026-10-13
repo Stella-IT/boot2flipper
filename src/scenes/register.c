@@ -1,4 +1,5 @@
 #include "../main.h"
+#include "../log.h"
 
 /**
  * SceneManagerHandlers initialization using the macro.
@@ -33,19 +34,19 @@ const SceneManagerHandlers scene_handlers = {
  */
 
 void register_scenes(App* app) {
-    FURI_LOG_I(APP_NAME, "Registering scenes - scene_num: %d", AppSceneNum);
-    FURI_LOG_I(APP_NAME, "scene_handlers.on_enter_handlers: %p", scene_handlers.on_enter_handlers);
-    FURI_LOG_I(APP_NAME, "scene_handlers.on_event_handlers: %p", scene_handlers.on_event_handlers);
-    FURI_LOG_I(APP_NAME, "scene_handlers.on_exit_handlers: %p", scene_handlers.on_exit_handlers);
-    FURI_LOG_I(APP_NAME, "scene_handlers.scene_num: %lu", scene_handlers.scene_num);
+    B2F_LOG_I(APP_NAME, "Registering scenes - scene_num: %d", AppSceneNum);
+    B2F_LOG_I(APP_NAME, "scene_handlers.on_enter_handlers: %p", scene_handlers.on_enter_handlers);
+    B2F_LOG_I(APP_NAME, "scene_handlers.on_event_handlers: %p", scene_handlers.on_event_handlers);
+    B2F_LOG_I(APP_NAME, "scene_handlers.on_exit_handlers: %p", scene_handlers.on_exit_handlers);
+    B2F_LOG_I(APP_NAME, "scene_handlers.scene_num: %lu", scene_handlers.scene_num);
 
     app->scene_manager = scene_manager_alloc(&scene_handlers, app);
     furi_assert(app->scene_manager != NULL, "Failed to allocate scene manager.");
-    FURI_LOG_I(APP_NAME, "Scene manager allocated: %p", app->scene_manager);
+    B2F_LOG_I(APP_NAME, "Scene manager allocated: %p", app->scene_manager);
 
     app->view_dispatcher = view_dispatcher_alloc();
     furi_assert(app->view_dispatcher != NULL, "Failed to allocate view dispatcher.");
-    FURI_LOG_I(APP_NAME, "View dispatcher allocated: %p", app->view_dispatcher);
+    B2F_LOG_I(APP_NAME, "View dispatcher allocated: %p", app->view_dispatcher);
 
     if(app->allocated_scenes == NULL) {
         app->allocated_scenes = (void**)malloc(sizeof(void*) * AppSceneNum);
@@ -62,20 +63,20 @@ void register_scenes(App* app) {
         app->view_dispatcher, scene_handler_navigation_forwarder);
     view_dispatcher_set_tick_event_callback(
         app->view_dispatcher, scene_handler_tick_forwarder, 500);
-    FURI_LOG_I(APP_NAME, "View dispatcher callbacks set");
+    B2F_LOG_I(APP_NAME, "View dispatcher callbacks set");
 
     View* view = NULL;
 #define SCENE_ACTION(scene)                                                                   \
-    FURI_LOG_I(APP_NAME, "Allocating scene: " STRINGIFY(scene) " (ID: %d)", scene);           \
+    B2F_LOG_I(APP_NAME, "Allocating scene: " STRINGIFY(scene) " (ID: %d)", scene);            \
     app->allocated_scenes[scene] = (void*)scene##_alloc();                                    \
     furi_assert(                                                                              \
         app->allocated_scenes[scene] != NULL, "Failed to allocate scene: " STRINGIFY(scene)); \
-    FURI_LOG_I(APP_NAME, "Getting view for scene: " STRINGIFY(scene));                        \
+    B2F_LOG_I(APP_NAME, "Getting view for scene: " STRINGIFY(scene));                         \
     view = scene##_get_view(app->allocated_scenes[scene]);                                    \
     furi_assert(view != NULL, "Failed to get view for scene: " STRINGIFY(scene));             \
-    FURI_LOG_I(APP_NAME, "Adding view %p with ID %d to dispatcher", view, scene);             \
+    B2F_LOG_I(APP_NAME, "Adding view %p with ID %d to dispatcher", view, scene);              \
     view_dispatcher_add_view(app->view_dispatcher, scene, view);                              \
-    FURI_LOG_I(APP_NAME, "Scene " STRINGIFY(scene) " registered successfully");
+    B2F_LOG_I(APP_NAME, "Scene " STRINGIFY(scene) " registered successfully");
 #include "list.h"
 #undef SCENE_ACTION
 }
@@ -84,45 +85,45 @@ void register_scenes(App* app) {
  * Free all scenes.
  */
 void free_scenes(App* app) {
-    FURI_LOG_I(APP_NAME, "Freeing scenes.");
+    B2F_LOG_I(APP_NAME, "Freeing scenes.");
     furi_assert(app != NULL, "App is NULL.");
     void* tmp;
-#define SCENE_ACTION(scene)                                                    \
-    if(app->view_dispatcher != NULL) {                                         \
-        FURI_LOG_I(APP_NAME, "Removing view for scene " STRINGIFY(scene) "."); \
-        view_dispatcher_remove_view(app->view_dispatcher, scene);              \
-    }                                                                          \
-    if(app->allocated_scenes != NULL) {                                        \
-        tmp = app->allocated_scenes[scene];                                    \
-        app->allocated_scenes[scene] = NULL;                                   \
-        FURI_LOG_I(APP_NAME, "Freeing scene " STRINGIFY(scene) ".");           \
-        if(tmp != NULL) scene##_free(tmp);                                     \
-        FURI_LOG_I(APP_NAME, "Free'd scene " STRINGIFY(scene) ".");            \
+#define SCENE_ACTION(scene)                                                   \
+    if(app->view_dispatcher != NULL) {                                        \
+        B2F_LOG_I(APP_NAME, "Removing view for scene " STRINGIFY(scene) "."); \
+        view_dispatcher_remove_view(app->view_dispatcher, scene);             \
+    }                                                                         \
+    if(app->allocated_scenes != NULL) {                                       \
+        tmp = app->allocated_scenes[scene];                                   \
+        app->allocated_scenes[scene] = NULL;                                  \
+        B2F_LOG_I(APP_NAME, "Freeing scene " STRINGIFY(scene) ".");           \
+        if(tmp != NULL) scene##_free(tmp);                                    \
+        B2F_LOG_I(APP_NAME, "Free'd scene " STRINGIFY(scene) ".");            \
     }
 
 #include "list.h"
 #undef SCENE_ACTION
 
-    FURI_LOG_I(APP_NAME, "Freeing allocated scenes.");
+    B2F_LOG_I(APP_NAME, "Freeing allocated scenes.");
     furi_assert(app->allocated_scenes != NULL, "Allocated scenes is NULL.");
     free(app->allocated_scenes);
     app->allocated_scenes = NULL;
 
-    FURI_LOG_I(APP_NAME, "Removing Home's custom views from dispatcher");
+    B2F_LOG_I(APP_NAME, "Removing Home's custom views from dispatcher");
     // Home scene registers custom views with IDs 100, 101, 102 that need to be removed
     view_dispatcher_remove_view(app->view_dispatcher, 100); // HOME_VIEW_MAIN_LIST
     view_dispatcher_remove_view(app->view_dispatcher, 101); // HOME_VIEW_TEXT_INPUT
     view_dispatcher_remove_view(app->view_dispatcher, 102); // HOME_VIEW_FILE_BROWSER
-    FURI_LOG_I(APP_NAME, "Home's custom views removed");
+    B2F_LOG_I(APP_NAME, "Home's custom views removed");
 
-    FURI_LOG_I(APP_NAME, "Freeing View dispatcher.");
+    B2F_LOG_I(APP_NAME, "Freeing View dispatcher.");
     furi_assert(app->view_dispatcher != NULL, "View dispatcher is NULL.");
     view_dispatcher_free(app->view_dispatcher);
 
-    FURI_LOG_I(APP_NAME, "Freeing SceneManager");
+    B2F_LOG_I(APP_NAME, "Freeing SceneManager");
     furi_assert(app->scene_manager != NULL, "Scene manager is NULL.");
     scene_manager_free(app->scene_manager);
 
-    FURI_LOG_I(APP_NAME, "Freeing App");
+    B2F_LOG_I(APP_NAME, "Freeing App");
     free(app);
 }

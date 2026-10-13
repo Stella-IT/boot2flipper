@@ -27,6 +27,14 @@
 #define PARTITION_SECTORS_GPT \
     (GPT_LAST_USABLE - PARTITION_START + 1) // GPT: reserve space for backup GPT
 
+// FAT32 geometry for a partition size (compile-time constants for both schemes)
+#define FAT_SIZE_SECTORS(partition_sectors) \
+    (((partition_sectors) / SECTORS_PER_CLUSTER * 4 + SECTOR_SIZE - 1) / SECTOR_SIZE)
+#define DATA_CLUSTERS(partition_sectors)                  \
+    (((partition_sectors) - RESERVED_SECTORS -            \
+      FAT_COPIES * FAT_SIZE_SECTORS(partition_sectors)) / \
+     SECTORS_PER_CLUSTER)
+
 /**
  * Partition table scheme
  */
@@ -164,6 +172,18 @@ uint32_t virtual_fat_get_total_sectors(VirtualFat* vfat);
  * @param scheme Partition scheme to use
  */
 void virtual_fat_set_partition_scheme(VirtualFat* vfat, PartitionScheme scheme);
+
+/**
+ * Set the files loaded by the legacy BIOS boot loader
+ * @param vfat Instance
+ * @param kernel_filename Root directory file to boot (e.g., "IPXE.LKR")
+ * @param initrd_filename Root directory file passed as initrd (e.g., "BOOT.CFG"), or NULL
+ * @return true if all files were found
+ */
+bool virtual_fat_set_bios_boot_files(
+    VirtualFat* vfat,
+    const char* kernel_filename,
+    const char* initrd_filename);
 
 /**
  * Set callback for file read events

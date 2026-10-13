@@ -5,6 +5,7 @@
 #include "../../disk/virtual_fat.h"
 #include "../../usb/usb_scsi.h"
 #include "../../usb/usb_msc.h"
+#include "../../log.h"
 
 #define THIS_SCENE UsbMassStorage
 
@@ -195,12 +196,12 @@ void UsbMassStorage_free(void* ptr) {
 
 View* UsbMassStorage_get_view(void* ptr) {
     AppUsbMassStorage* instance = (AppUsbMassStorage*)ptr;
-    FURI_LOG_I("UsbMassStorage", "UsbMassStorage_get_view called, instance: %p", instance);
+    B2F_LOG_I("UsbMassStorage", "UsbMassStorage_get_view called, instance: %p", instance);
     if(instance == NULL) {
-        FURI_LOG_E("UsbMassStorage", "instance is NULL in get_view!");
+        B2F_LOG_E("UsbMassStorage", "instance is NULL in get_view!");
         return NULL;
     }
-    FURI_LOG_I("UsbMassStorage", "instance->view: %p", instance->view);
+    B2F_LOG_I("UsbMassStorage", "instance->view: %p", instance->view);
     return instance->view;
 }
 
@@ -342,6 +343,17 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
             if(!virtual_fat_add_file_to_subdir(
                    storage, instance->vfat, "EFI/BOOT", "BOOTX64.EFI", IPXE_UEFI_PATH)) {
                 furi_string_set(instance->status_text, "Failed to add BOOTX64.EFI");
+                virtual_fat_free(instance->vfat);
+                instance->vfat = NULL;
+                instance->state = UsbMassStorageStateError;
+                furi_record_close(RECORD_STORAGE);
+                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
+                return true;
+            }
+
+            // Legacy BIOS boot loads IPXE.LKR with the script as initrd
+            if(!virtual_fat_set_bios_boot_files(instance->vfat, "IPXE.LKR", "BOOT.CFG")) {
+                furi_string_set(instance->status_text, "Failed to set up BIOS boot");
                 virtual_fat_free(instance->vfat);
                 instance->vfat = NULL;
                 instance->state = UsbMassStorageStateError;

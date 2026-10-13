@@ -3,6 +3,7 @@
 #include <gui/gui.h>
 #include "main.h"
 #include "scenes/register.h"
+#include "log.h"
 
 int main() {
     App* app = malloc(sizeof(App));
@@ -31,7 +32,7 @@ int main() {
 
     view_dispatcher_run(app->view_dispatcher);
 
-    FURI_LOG_I(APP_NAME, "Exiting application.");
+    B2F_LOG_I(APP_NAME, "Exiting application.");
     free_scenes(app);
 
     furi_record_close(RECORD_DIALOGS);
@@ -45,7 +46,7 @@ int main() {
     // Free global configuration
     config_free(app->config);
 
-    FURI_LOG_I(APP_NAME, "Freed app.");
+    B2F_LOG_I(APP_NAME, "Freed app.");
 
     return 0;
 }

@@ -1,6 +1,7 @@
 #include "usb_mass_storage.h"
 #include "usb_scsi.h"
 #include <furi_hal_usb.h>
+#include "../log.h"
 
 #define TAG "UsbMassStorage"
 
@@ -38,11 +39,11 @@ void usb_mass_storage_free(UsbMassStorageContext* ctx) {
 
 bool usb_mass_storage_start(UsbMassStorageContext* ctx, const char* disk_path) {
     if(ctx == NULL || ctx->active) {
-        FURI_LOG_E(TAG, "Invalid context or already active");
+        B2F_LOG_E(TAG, "Invalid context or already active");
         return false;
     }
 
-    FURI_LOG_I(TAG, "Starting USB Mass Storage with disk: %s", disk_path);
+    B2F_LOG_I(TAG, "Starting USB Mass Storage with disk: %s", disk_path);
 
     furi_string_set_str(ctx->disk_path, disk_path);
 
@@ -56,7 +57,7 @@ bool usb_mass_storage_start(UsbMassStorageContext* ctx, const char* disk_path) {
     ctx->active = true;
     furi_string_set_str(ctx->status, "Active");
 
-    FURI_LOG_I(TAG, "USB Mass Storage started successfully");
+    B2F_LOG_I(TAG, "USB Mass Storage started successfully");
     return true;
 }
 
@@ -65,7 +66,7 @@ void usb_mass_storage_stop(UsbMassStorageContext* ctx) {
         return;
     }
 
-    FURI_LOG_I(TAG, "Stopping USB Mass Storage");
+    B2F_LOG_I(TAG, "Stopping USB Mass Storage");
 
     // TODO: Restore USB mode
     // furi_hal_usb_set_config(&usb_cdc_single, NULL);
@@ -75,7 +76,7 @@ void usb_mass_storage_stop(UsbMassStorageContext* ctx) {
     ctx->active = false;
     furi_string_set_str(ctx->status, "Stopped");
 
-    FURI_LOG_I(TAG, "USB Mass Storage stopped");
+    B2F_LOG_I(TAG, "USB Mass Storage stopped");
 }
 
 bool usb_mass_storage_is_active(UsbMassStorageContext* ctx) {

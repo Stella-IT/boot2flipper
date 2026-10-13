@@ -1,5 +1,6 @@
 #include "usb_scsi.h"
 #include <string.h>
+#include "../log.h"
 
 #define TAG "UsbScsi"
 
@@ -24,6 +25,8 @@ struct UsbScsiContext {
 
     // READ_10 / WRITE_10 state
     uint32_t current_lba;
+    uint32_t read_start_lba; // For READ_10 throughput logging
+    uint32_t read_start_tick;
     uint32_t remaining_blocks;
     uint8_t block_buffer[SCSI_BLOCK_SIZE];
     size_t buffer_offset;
@@ -49,14 +52,14 @@ void usb_scsi_free(UsbScsiContext* ctx) {
 
 bool usb_scsi_set_virtual_fat(UsbScsiContext* ctx, VirtualFat* vfat) {
     if(ctx == NULL || vfat == NULL) {
-        FURI_LOG_E(TAG, "Invalid parameters");
+        B2F_LOG_E(TAG, "Invalid parameters");
         return false;
     }
 
     ctx->vfat = vfat;
     ctx->active = true;
 
-    FURI_LOG_I(TAG, "Virtual FAT set, total sectors: %lu", virtual_fat_get_total_sectors(vfat));
+    B2F_LOG_I(TAG, "Virtual FAT set, total sectors: %lu", virtual_fat_get_total_sectors(vfat));
     return true;
 }
 
@@ -67,7 +70,7 @@ void usb_scsi_clear(UsbScsiContext* ctx) {
     ctx->active = false;
     ctx->state = SCSI_STATE_IDLE;
 
-    FURI_LOG_I(TAG, "Virtual FAT cleared");
+    B2F_LOG_I(TAG, "Virtual FAT cleared");
 }
 
 static void scsi_set_sense(UsbScsiContext* ctx, uint8_t sense_key, uint8_t asc) {
@@ -77,12 +80,12 @@ static void scsi_set_sense(UsbScsiContext* ctx, uint8_t sense_key, uint8_t asc) 
 
 static bool scsi_cmd_test_unit_ready(UsbScsiContext* ctx) {
     UNUSED(ctx);
-    FURI_LOG_D(TAG, "SCSI: TEST_UNIT_READY");
+    B2F_LOG_D(TAG, "SCSI: TEST_UNIT_READY");
     return true;
 }
 
 static bool scsi_cmd_inquiry(UsbScsiContext* ctx, uint8_t* cmd) {
-    FURI_LOG_D(TAG, "SCSI: INQUIRY");
+    B2F_LOG_D(TAG, "SCSI: INQUIRY");
 
     // Check for VPD (Vital Product Data)
     bool evpd = (cmd[1] & 0x01) != 0;
@@ -92,7 +95,7 @@ static bool scsi_cmd_inquiry(UsbScsiContext* ctx, uint8_t* cmd) {
         // VPD page requested
         if(page_code == 0x00) {
             // Supported VPD Pages
-            FURI_LOG_D(TAG, "INQUIRY: VPD Supported Pages (0x00)");
+            B2F_LOG_D(TAG, "INQUIRY: VPD Supported Pages (0x00)");
             uint8_t vpd_data[6] = {
                 SCSI_DEVICE_TYPE_DIRECT_ACCESS, // Peripheral Device Type
                 0x00, // Page Code
@@ -109,7 +112,7 @@ static bool scsi_cmd_inquiry(UsbScsiContext* ctx, uint8_t* cmd) {
             return true;
         } else if(page_code == 0x80) {
             // Unit Serial Number
-            FURI_LOG_D(TAG, "INQUIRY: VPD Unit Serial Number (0x80)");
+            B2F_LOG_D(TAG, "INQUIRY: VPD Unit Serial Number (0x80)");
             uint8_t vpd_data[8] = {
                 SCSI_DEVICE_TYPE_DIRECT_ACCESS, // Peripheral Device Type
                 0x80, // Page Code
@@ -128,14 +131,14 @@ static bool scsi_cmd_inquiry(UsbScsiContext* ctx, uint8_t* cmd) {
             return true;
         } else {
             // Unsupported VPD page
-            FURI_LOG_W(TAG, "INQUIRY: Unsupported VPD page 0x%02X", page_code);
+            B2F_LOG_W(TAG, "INQUIRY: Unsupported VPD page 0x%02X", page_code);
             scsi_set_sense(ctx, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_FIELD_IN_CDB);
             return false;
         }
     }
 
     // Standard INQUIRY response
-    FURI_LOG_D(TAG, "INQUIRY: Standard");
+    B2F_LOG_D(TAG, "INQUIRY: Standard");
     uint8_t inquiry_data[SCSI_INQUIRY_DATA_SIZE] = {
         SCSI_DEVICE_TYPE_DIRECT_ACCESS, // Peripheral Device Type
         0x80, // Removable
@@ -187,7 +190,7 @@ static bool scsi_cmd_inquiry(UsbScsiContext* ctx, uint8_t* cmd) {
 }
 
 static bool scsi_cmd_read_capacity_10(UsbScsiContext* ctx) {
-    FURI_LOG_D(TAG, "SCSI: READ_CAPACITY_10");
+    B2F_LOG_D(TAG, "SCSI: READ_CAPACITY_10");
 
     if(!ctx->vfat) {
         scsi_set_sense(ctx, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT);
@@ -227,18 +230,18 @@ static bool scsi_cmd_read_10(UsbScsiContext* ctx, uint8_t* cmd) {
                    cmd[5];
     uint16_t length = ((uint16_t)cmd[7] << 8) | cmd[8];
 
-    FURI_LOG_D(TAG, "SCSI: READ_10 LBA=%lu, Length=%u", lba, length);
-
     // Check bounds
     uint32_t total_blocks = virtual_fat_get_total_sectors(ctx->vfat);
     if(lba + length > total_blocks) {
-        FURI_LOG_E(TAG, "READ_10: LBA out of range");
+        B2F_LOG_E(TAG, "READ_10: LBA out of range");
         scsi_set_sense(ctx, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_LBA_OUT_OF_RANGE);
         return false;
     }
 
     ctx->is_small_data_mode = false; // Sector-based transmission
     ctx->current_lba = lba;
+    ctx->read_start_lba = lba;
+    ctx->read_start_tick = furi_get_tick();
     ctx->remaining_blocks = length;
     ctx->buffer_offset = 0;
     ctx->state = SCSI_STATE_TX_DATA;
@@ -247,7 +250,7 @@ static bool scsi_cmd_read_10(UsbScsiContext* ctx, uint8_t* cmd) {
 }
 
 static bool scsi_cmd_mode_sense_6(UsbScsiContext* ctx) {
-    FURI_LOG_D(TAG, "SCSI: MODE_SENSE_6");
+    B2F_LOG_D(TAG, "SCSI: MODE_SENSE_6");
 
     // Return minimal mode sense data
     uint8_t mode_sense_data[4] = {
@@ -267,7 +270,7 @@ static bool scsi_cmd_mode_sense_6(UsbScsiContext* ctx) {
 }
 
 static bool scsi_cmd_mode_sense_10(UsbScsiContext* ctx) {
-    FURI_LOG_D(TAG, "SCSI: MODE_SENSE_10");
+    B2F_LOG_D(TAG, "SCSI: MODE_SENSE_10");
 
     // Return minimal mode sense data (10-byte version)
     uint8_t mode_sense_data[8] = {
@@ -291,7 +294,7 @@ static bool scsi_cmd_mode_sense_10(UsbScsiContext* ctx) {
 }
 
 static bool scsi_cmd_read_format_capacities(UsbScsiContext* ctx) {
-    FURI_LOG_D(TAG, "SCSI: READ_FORMAT_CAPACITIES");
+    B2F_LOG_D(TAG, "SCSI: READ_FORMAT_CAPACITIES");
 
     if(!ctx->vfat) {
         scsi_set_sense(ctx, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT);
@@ -362,7 +365,7 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
         return scsi_cmd_mode_sense_10(ctx);
 
     case SCSI_CMD_REQUEST_SENSE:
-        FURI_LOG_D(TAG, "SCSI: REQUEST_SENSE");
+        B2F_LOG_D(TAG, "SCSI: REQUEST_SENSE");
         // Prepare sense data response (18 bytes)
         usb_scsi_get_sense_data(ctx, ctx->block_buffer);
         ctx->is_small_data_mode = true; // Byte-based transmission
@@ -372,7 +375,7 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
         return true;
 
     case SCSI_CMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
-        FURI_LOG_D(TAG, "SCSI: PREVENT_ALLOW_MEDIUM_REMOVAL (ignored)");
+        B2F_LOG_D(TAG, "SCSI: PREVENT_ALLOW_MEDIUM_REMOVAL (ignored)");
         // We can't physically lock the medium, just acknowledge the command
         return true;
 
@@ -383,7 +386,7 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
         }
         bool eject = (cmd[4] & 0x02) != 0;
         bool start = (cmd[4] & 0x01) != 0;
-        FURI_LOG_D(TAG, "SCSI: START_STOP_UNIT eject=%d start=%d", eject, start);
+        B2F_LOG_D(TAG, "SCSI: START_STOP_UNIT eject=%d start=%d", eject, start);
         // For virtual FAT read-only media, we can't physically eject
         // Just acknowledge the command
         // TODO: Could notify the app to exit USB mode if eject is requested
@@ -392,12 +395,12 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
 
     case SCSI_CMD_WRITE_10:
         // Read-only filesystem
-        FURI_LOG_W(TAG, "SCSI: WRITE_10 not supported (read-only)");
+        B2F_LOG_W(TAG, "SCSI: WRITE_10 not supported (read-only)");
         scsi_set_sense(ctx, SCSI_SENSE_DATA_PROTECT, 0x27); // Write protected
         return false;
 
     default:
-        FURI_LOG_W(TAG, "SCSI: Unknown command 0x%02X", opcode);
+        B2F_LOG_W(TAG, "SCSI: Unknown command 0x%02X", opcode);
         scsi_set_sense(ctx, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_INVALID_COMMAND);
         return false;
     }
@@ -405,19 +408,19 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
 
 size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_len) {
     if(ctx == NULL || buffer == NULL) {
-        FURI_LOG_E(TAG, "TX: NULL params");
+        B2F_LOG_E(TAG, "TX: NULL params");
         return 0;
     }
 
     if(ctx->state != SCSI_STATE_TX_DATA) {
-        FURI_LOG_D(TAG, "TX: not in TX_DATA state (state=%d)", ctx->state);
+        B2F_LOG_D(TAG, "TX: not in TX_DATA state (state=%d)", ctx->state);
         return 0;
     }
 
     Storage* storage = ctx->storage;
     size_t bytes_to_send = 0;
 
-    // FURI_LOG_D(TAG, "TX: remaining=%u, offset=%u, lba=%lu, mode=%s",
+    // B2F_LOG_D(TAG, "TX: remaining=%u, offset=%u, lba=%lu, mode=%s",
     //            (unsigned int)ctx->remaining_blocks, (unsigned int)ctx->buffer_offset,
     //            ctx->current_lba, ctx->is_small_data_mode ? "byte" : "sector");
 
@@ -428,7 +431,7 @@ size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_l
 
         // Check if all data already sent
         if(ctx->buffer_offset >= ctx->remaining_blocks) {
-            FURI_LOG_D(TAG, "TX: small data complete");
+            B2F_LOG_D(TAG, "TX: small data complete");
             ctx->state = SCSI_STATE_IDLE;
             return 0;
         }
@@ -450,7 +453,7 @@ size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_l
 
         // Check if all sectors sent and buffer drained
         if(ctx->remaining_blocks == 0 && ctx->buffer_offset == 0) {
-            FURI_LOG_D(TAG, "TX: all sectors complete");
+            B2F_LOG_D(TAG, "TX: all sectors complete");
             ctx->state = SCSI_STATE_IDLE;
             return 0;
         }
@@ -458,7 +461,7 @@ size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_l
         // Need to load next sector?
         if(ctx->buffer_offset == 0 && ctx->remaining_blocks > 0) {
             if(!virtual_fat_read_sector(storage, ctx->vfat, ctx->current_lba, ctx->block_buffer)) {
-                FURI_LOG_E(TAG, "Failed to read sector %lu", ctx->current_lba);
+                B2F_LOG_E(TAG, "Failed to read sector %lu", ctx->current_lba);
                 ctx->state = SCSI_STATE_IDLE;
                 return 0;
             }
@@ -479,6 +482,16 @@ size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_l
 
             if(ctx->remaining_blocks == 0) {
                 // All sectors sent
+                uint32_t blocks = ctx->current_lba - ctx->read_start_lba;
+                uint32_t ms = (furi_get_tick() - ctx->read_start_tick) * 1000 /
+                              furi_kernel_get_tick_frequency();
+                B2F_LOG_D(
+                    TAG,
+                    "SCSI: READ_10 LBA=%lu, Length=%lu: %lu ms, %lu KB/s",
+                    ctx->read_start_lba,
+                    blocks,
+                    ms,
+                    ms ? blocks * SCSI_BLOCK_SIZE / ms : 0);
                 ctx->state = SCSI_STATE_IDLE;
             }
         }

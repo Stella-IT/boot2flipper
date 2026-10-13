@@ -2,21 +2,40 @@
 #include "crc32.h"
 #include "mbr.h"
 #include "gpt.h"
+#include "bios_boot.h"
 #include <storage/storage.h>
 #include <ctype.h>
+#include "../log.h"
 
-#define TAG       "VirtualFAT"
-#define MAX_FILES 16
+#define TAG           "VirtualFAT"
+#define MAX_FILES     16
+#define SD_CACHE_SIZE 4096 // SD read-ahead size, multiple of SECTOR_SIZE
 
 // VFAT Long Filename (LFN) support
 #define LFN_ATTR 0x0F // LFN attribute (read-only + system + hidden + volume)
 #define LFN_LAST 0x40 // Last LFN entry flag
+
+// Hosts pick the FAT type from the cluster count, so it must stay FAT32
+_Static_assert(DATA_CLUSTERS(PARTITION_SECTORS_MBR) >= 65525, "MBR partition too small for FAT32");
+_Static_assert(DATA_CLUSTERS(PARTITION_SECTORS_GPT) >= 65525, "GPT partition too small for FAT32");
 
 struct VirtualFat {
     VirtualFatFile files[MAX_FILES];
     uint8_t file_count;
     uint32_t next_cluster;
     PartitionScheme partition_scheme;
+    int8_t bios_kernel_index; // File loaded by the BIOS boot loader, -1 if unset
+    int8_t bios_initrd_index;
+
+    // SD read-ahead: one open file and one cache shared by all SD-backed files,
+    // so memory stays fixed no matter how many files are added
+    File* sd_file; // Open handle of sd_file_index, NULL if none
+    int8_t sd_file_index;
+    uint32_t sd_file_pos; // Current position of sd_file
+    uint8_t* sd_cache; // SD_CACHE_SIZE bytes, allocated on first use
+    int8_t sd_cache_index; // File held in sd_cache, -1 if empty
+    uint32_t sd_cache_offset; // File offset of sd_cache[0]
+
     VirtualFatFileReadCallback read_callback;
     void* callback_context;
 };
@@ -28,12 +47,28 @@ VirtualFat* virtual_fat_alloc(void) {
     vfat->file_count = 0;
     vfat->partition_scheme = PARTITION_SCHEME_GPT_ONLY; // Default: GPT (UEFI)
     vfat->next_cluster = 3; // Cluster 2 is root directory, files start at cluster 3
+    vfat->bios_kernel_index = -1;
+    vfat->bios_initrd_index = -1;
+    vfat->sd_file_index = -1;
+    vfat->sd_cache_index = -1;
 
     return vfat;
 }
 
+static void sd_file_close(VirtualFat* vfat) {
+    if(vfat->sd_file != NULL) {
+        storage_file_close(vfat->sd_file);
+        storage_file_free(vfat->sd_file);
+        vfat->sd_file = NULL;
+    }
+    vfat->sd_file_index = -1;
+}
+
 void virtual_fat_free(VirtualFat* vfat) {
     if(vfat == NULL) return;
+
+    sd_file_close(vfat);
+    free(vfat->sd_cache);
 
     // Free file data
     for(uint8_t i = 0; i < vfat->file_count; i++) {
@@ -54,7 +89,7 @@ bool virtual_fat_add_file(
     const uint8_t* data,
     uint32_t size) {
     if(vfat == NULL || vfat->file_count >= MAX_FILES) {
-        FURI_LOG_E(TAG, "Cannot add file: filesystem full");
+        B2F_LOG_E(TAG, "Cannot add file: filesystem full");
         return false;
     }
 
@@ -103,7 +138,7 @@ bool virtual_fat_add_file(
 
     vfat->file_count++;
 
-    FURI_LOG_I(
+    B2F_LOG_I(
         TAG,
         "Added file: %.11s, size: %lu, cluster: %lu",
         file->name,
@@ -123,7 +158,7 @@ bool virtual_fat_add_sd_file(
     const char* filename,
     const char* sd_path) {
     if(vfat == NULL || vfat->file_count >= MAX_FILES) {
-        FURI_LOG_E(TAG, "Cannot add SD file: filesystem full");
+        B2F_LOG_E(TAG, "Cannot add SD file: filesystem full");
         return false;
     }
 
@@ -131,7 +166,7 @@ bool virtual_fat_add_sd_file(
     File* file = storage_file_alloc(storage);
 
     if(!storage_file_open(file, sd_path, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        FURI_LOG_E(TAG, "Cannot open SD file: %s", sd_path);
+        B2F_LOG_E(TAG, "Cannot open SD file: %s", sd_path);
         storage_file_free(file);
         return false;
     }
@@ -183,7 +218,7 @@ bool virtual_fat_add_sd_file(
 
     vfat->file_count++;
 
-    FURI_LOG_I(
+    B2F_LOG_I(
         TAG,
         "Added SD file: %.11s, size: %lu, cluster: %lu, path: %s",
         vfat_file->name,
@@ -217,7 +252,7 @@ static int8_t find_directory(VirtualFat* vfat, const char* name, int8_t parent_i
 
 bool virtual_fat_add_directory(VirtualFat* vfat, const char* dirname) {
     if(vfat == NULL || vfat->file_count >= MAX_FILES) {
-        FURI_LOG_E(TAG, "Cannot add directory: filesystem full");
+        B2F_LOG_E(TAG, "Cannot add directory: filesystem full");
         return false;
     }
 
@@ -252,7 +287,7 @@ bool virtual_fat_add_directory(VirtualFat* vfat, const char* dirname) {
 
     vfat->file_count++;
 
-    FURI_LOG_I(TAG, "Added directory: %.11s, cluster: %lu", dir->name, dir->start_cluster);
+    B2F_LOG_I(TAG, "Added directory: %.11s, cluster: %lu", dir->name, dir->start_cluster);
 
     return true;
 }
@@ -292,7 +327,7 @@ static int8_t create_directory_path(VirtualFat* vfat, const char* path) {
         if(dir_index < 0) {
             // Create new directory
             if(vfat->file_count >= MAX_FILES) {
-                FURI_LOG_E(TAG, "Cannot create directory: filesystem full");
+                B2F_LOG_E(TAG, "Cannot create directory: filesystem full");
                 return -1;
             }
 
@@ -323,7 +358,7 @@ static int8_t create_directory_path(VirtualFat* vfat, const char* path) {
             dir_index = vfat->file_count;
             vfat->file_count++;
 
-            FURI_LOG_I(
+            B2F_LOG_I(
                 TAG,
                 "Created directory: %.11s (parent: %d, cluster: %lu)",
                 dir->name,
@@ -344,21 +379,21 @@ bool virtual_fat_add_file_to_subdir(
     const char* filename,
     const char* sd_path) {
     if(vfat == NULL || vfat->file_count >= MAX_FILES) {
-        FURI_LOG_E(TAG, "Cannot add file to subdir: filesystem full");
+        B2F_LOG_E(TAG, "Cannot add file to subdir: filesystem full");
         return false;
     }
 
     // Create parent directory path if needed
     int8_t parent_index = create_directory_path(vfat, parent_dir);
     if(parent_index < 0) {
-        FURI_LOG_E(TAG, "Failed to create parent directory: %s", parent_dir);
+        B2F_LOG_E(TAG, "Failed to create parent directory: %s", parent_dir);
         return false;
     }
 
     // Open SD file to get size
     File* file = storage_file_alloc(storage);
     if(!storage_file_open(file, sd_path, FSAM_READ, FSOM_OPEN_EXISTING)) {
-        FURI_LOG_E(TAG, "Cannot open SD file: %s", sd_path);
+        B2F_LOG_E(TAG, "Cannot open SD file: %s", sd_path);
         storage_file_free(file);
         return false;
     }
@@ -407,7 +442,7 @@ bool virtual_fat_add_file_to_subdir(
 
     vfat->file_count++;
 
-    FURI_LOG_I(
+    B2F_LOG_I(
         TAG,
         "Added file to subdir: %.11s, parent: %d, size: %lu, cluster: %lu",
         vfat_file->name,
@@ -461,8 +496,7 @@ static void generate_boot_sector(uint8_t* buffer, uint32_t total_sectors) {
     buffer[35] = (total_sectors >> 24) & 0xFF;
 
     // Calculate FAT size
-    uint32_t cluster_count = total_sectors / SECTORS_PER_CLUSTER;
-    uint32_t fat_size = ((cluster_count * 4) + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    uint32_t fat_size = FAT_SIZE_SECTORS(total_sectors);
 
     // FAT32 Extended BPB
     buffer[36] = fat_size & 0xFF;              // FAT size (4 bytes)
@@ -494,13 +528,9 @@ static void generate_boot_sector(uint8_t* buffer, uint32_t total_sectors) {
     memcpy(&buffer[71], "Boot2Flippr", 11);   // Volume label (11 bytes)
     memcpy(&buffer[82], "FAT32   ", 8);       // File system type (8 bytes)
 
-    // FAT32 Bootstrap code - loads BOOT.CFG via iPXE embedded script
-    // NOTE: For actual BIOS boot, you need to:
-    // 1. Build iPXE with embedded script pointing to BOOT.CFG
-    // 2. Replace this boot sector with the iPXE boot sector
-    // 3. Keep the BPB (bytes 0-89) from this sector
-    //
-    // For now, this is a placeholder that prints a message
+    // FAT32 Bootstrap code - only runs if something chainloads the partition.
+    // BIOS boot is handled by the MBR boot code (see bios_boot.c), which
+    // loads IPXE.LKR directly, so this just prints a message.
     const uint8_t fat32_bootstrap[] = {
         // Code starts at offset 90 (after BPB)
         0xFA,                           // CLI
@@ -537,7 +567,8 @@ static void generate_boot_sector(uint8_t* buffer, uint32_t total_sectors) {
     buffer[511] = 0xAA;
 }
 
-static void generate_fsinfo_sector(uint8_t* buffer) {
+static void
+    generate_fsinfo_sector(uint8_t* buffer, uint32_t free_clusters, uint32_t next_free_cluster) {
     memset(buffer, 0, SECTOR_SIZE);
 
     // FS Info signature 1
@@ -552,17 +583,17 @@ static void generate_fsinfo_sector(uint8_t* buffer) {
     buffer[486] = 0x41;
     buffer[487] = 0x61;
 
-    // Free cluster count (0xFFFFFFFF = unknown)
-    buffer[488] = 0xFF;
-    buffer[489] = 0xFF;
-    buffer[490] = 0xFF;
-    buffer[491] = 0xFF;
+    // Free cluster count, so hosts don't scan the whole FAT to compute it
+    buffer[488] = free_clusters & 0xFF;
+    buffer[489] = (free_clusters >> 8) & 0xFF;
+    buffer[490] = (free_clusters >> 16) & 0xFF;
+    buffer[491] = (free_clusters >> 24) & 0xFF;
 
-    // Next free cluster (0xFFFFFFFF = unknown)
-    buffer[492] = 0xFF;
-    buffer[493] = 0xFF;
-    buffer[494] = 0xFF;
-    buffer[495] = 0xFF;
+    // Next free cluster
+    buffer[492] = next_free_cluster & 0xFF;
+    buffer[493] = (next_free_cluster >> 8) & 0xFF;
+    buffer[494] = (next_free_cluster >> 16) & 0xFF;
+    buffer[495] = (next_free_cluster >> 24) & 0xFF;
 
     // Trail signature
     buffer[508] = 0x00;
@@ -599,17 +630,19 @@ static void generate_fat_sector(VirtualFat* vfat, uint32_t fat_sector, uint8_t* 
                        (SECTORS_PER_CLUSTER * SECTOR_SIZE);
         }
 
-        for(uint32_t c = 0; c < clusters; c++) {
-            uint32_t cluster_num = file->start_cluster + c;
+        if(clusters == 0) continue;
 
-            if(cluster_num >= first_entry && cluster_num < first_entry + entries_per_sector) {
-                uint32_t idx = cluster_num - first_entry;
+        // Only visit the part of the chain that falls in this FAT sector
+        uint32_t last_cluster = file->start_cluster + clusters - 1;
+        uint32_t from = MAX(file->start_cluster, first_entry);
+        uint32_t to = MIN(last_cluster, first_entry + entries_per_sector - 1);
+        if(from > to) continue;
 
-                if(c == clusters - 1) {
-                    fat[idx] = 0x0FFFFFFF; // End of chain
-                } else {
-                    fat[idx] = cluster_num + 1; // Next cluster
-                }
+        for(uint32_t cluster_num = from; cluster_num <= to; cluster_num++) {
+            if(cluster_num == last_cluster) {
+                fat[cluster_num - first_entry] = 0x0FFFFFFF; // End of chain
+            } else {
+                fat[cluster_num - first_entry] = cluster_num + 1; // Next cluster
             }
         }
     }
@@ -723,14 +756,14 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
     uint8_t* entry = buffer;
     uint8_t entry_count = 0;
 
-    FURI_LOG_I(TAG, "Generating root directory, file_count: %u", vfat->file_count);
+    B2F_LOG_I(TAG, "Generating root directory, file_count: %u", vfat->file_count);
 
     // Only show files/dirs with parent_index == -1 (root)
     for(uint8_t i = 0; i < vfat->file_count && entry_count < (SECTOR_SIZE / 32); i++) {
         VirtualFatFile* file = &vfat->files[i];
 
         if(file->parent_index != -1) {
-            FURI_LOG_D(
+            B2F_LOG_D(
                 TAG, "Skipping file %u (not in root, parent_index=%d)", i, file->parent_index);
             continue; // Skip non-root entries
         }
@@ -755,7 +788,7 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
         uint8_t attributes = file->is_directory ? 0x10 : 0x20;
         write_directory_entry(entry, file->name, attributes, file->start_cluster, file->size);
 
-        FURI_LOG_I(
+        B2F_LOG_I(
             TAG,
             "Root entry %u: %.11s (LFN: %s), cluster: %lu, size: %lu, dir: %d",
             entry_count,
@@ -769,7 +802,7 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
         entry_count++;
     }
 
-    FURI_LOG_I(TAG, "Root directory complete, total entries: %u", entry_count);
+    B2F_LOG_I(TAG, "Root directory complete, total entries: %u", entry_count);
 }
 
 // Generate subdirectory content (includes . and .. entries)
@@ -836,38 +869,94 @@ static void generate_subdirectory(VirtualFat* vfat, int8_t dir_index, uint8_t* b
     }
 }
 
+// Read from an SD-backed file through the read-ahead cache. The last used file
+// stays open, so sequential reads need no open/seek per sector.
+static bool sd_file_read(
+    Storage* storage,
+    VirtualFat* vfat,
+    int8_t index,
+    uint32_t offset,
+    uint8_t* buffer,
+    uint32_t size) {
+    VirtualFatFile* file = &vfat->files[index];
+    uint32_t block = offset - (offset % SD_CACHE_SIZE);
+
+    if(vfat->sd_cache_index != index || vfat->sd_cache_offset != block) {
+        vfat->sd_cache_index = -1;
+        if(vfat->sd_cache == NULL) vfat->sd_cache = malloc(SD_CACHE_SIZE);
+
+        if(vfat->sd_file_index != index) {
+            sd_file_close(vfat);
+            vfat->sd_file = storage_file_alloc(storage);
+            if(!storage_file_open(
+                   vfat->sd_file,
+                   furi_string_get_cstr(file->sd_path),
+                   FSAM_READ,
+                   FSOM_OPEN_EXISTING)) {
+                B2F_LOG_E(TAG, "Failed to open SD file: %s", furi_string_get_cstr(file->sd_path));
+                sd_file_close(vfat);
+                return false;
+            }
+            vfat->sd_file_index = index;
+            vfat->sd_file_pos = 0;
+        }
+
+        if(vfat->sd_file_pos != block) {
+            if(!storage_file_seek(vfat->sd_file, block, true)) {
+                B2F_LOG_E(TAG, "SD seek failed: %s @ %lu", file->long_name, block);
+                sd_file_close(vfat);
+                return false;
+            }
+            vfat->sd_file_pos = block;
+        }
+
+        uint32_t length = file->size - block;
+        if(length > SD_CACHE_SIZE) length = SD_CACHE_SIZE;
+        size_t bytes_read = storage_file_read(vfat->sd_file, vfat->sd_cache, length);
+        if(bytes_read != length) {
+            B2F_LOG_W(
+                TAG, "SD read mismatch: expected %lu, got %u", length, (unsigned int)bytes_read);
+            sd_file_close(vfat);
+            return false;
+        }
+        vfat->sd_file_pos += length;
+        vfat->sd_cache_index = index;
+        vfat->sd_cache_offset = block;
+    }
+
+    memcpy(buffer, vfat->sd_cache + (offset - block), size);
+    return true;
+}
+
 bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, uint8_t* buffer) {
     if(vfat == NULL || buffer == NULL) return false;
 
-    // Log which sectors are being read
-    static uint32_t last_logged_lba = 0xFFFFFFFF;
-    if(lba != last_logged_lba && lba < 100) { // Only log first 100 sectors to avoid spam
-        FURI_LOG_I(TAG, "Reading LBA %lu", lba);
-        last_logged_lba = lba;
-    }
+    B2F_LOG_IO(TAG, "Reading LBA %lu", lba);
 
     // Partition size depends on scheme (use macros from virtual_fat.h)
     const uint32_t PARTITION_SECTORS = (vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) ?
                                            PARTITION_SECTORS_GPT :
                                            PARTITION_SECTORS_MBR;
 
-    uint32_t cluster_count = PARTITION_SECTORS / SECTORS_PER_CLUSTER;
-    uint32_t fat_size = ((cluster_count * 4) + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    uint32_t fat_size = FAT_SIZE_SECTORS(PARTITION_SECTORS);
     uint32_t fat1_start = PARTITION_START + RESERVED_SECTORS;
     uint32_t fat2_start = fat1_start + fat_size;
     uint32_t data_start = fat2_start + fat_size;
+    uint32_t free_clusters = DATA_CLUSTERS(PARTITION_SECTORS) - (vfat->next_cluster - 2);
 
     // LBA 0: MBR or Protective MBR depending on partition scheme
     if(lba == 0) {
         if(vfat->partition_scheme == PARTITION_SCHEME_MBR_ONLY) {
             // MBR only - bootable FAT32 partition
             generate_mbr(buffer, PARTITION_START, PARTITION_SECTORS, 0xEF);
-            FURI_LOG_D(TAG, "Generated MBR (MBR-only mode)");
+            B2F_LOG_D(TAG, "Generated MBR (MBR-only mode)");
         } else {
             // GPT only - protective MBR
             generate_protective_mbr(buffer, TOTAL_SECTORS);
-            FURI_LOG_D(TAG, "Generated Protective MBR (GPT mode)");
+            B2F_LOG_D(TAG, "Generated Protective MBR (GPT mode)");
         }
+        // BIOS boot code in both modes (ignored by UEFI)
+        bios_boot_write_mbr_code(buffer);
         return true;
     }
 
@@ -875,7 +964,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     if(lba == 1) {
         if(vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) {
             generate_gpt_header(buffer, TOTAL_SECTORS, PARTITION_START, PARTITION_SECTORS);
-            FURI_LOG_D(TAG, "Generated GPT header at LBA 1");
+            B2F_LOG_D(TAG, "Generated GPT header at LBA 1");
         } else {
             // MBR mode: no GPT header
             memset(buffer, 0, SECTOR_SIZE);
@@ -887,11 +976,28 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     if(lba == 2) {
         if(vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) {
             generate_gpt_partitions(buffer, PARTITION_START, PARTITION_SECTORS);
-            FURI_LOG_D(TAG, "Generated GPT partitions at LBA 2");
+            B2F_LOG_D(TAG, "Generated GPT partitions at LBA 2");
         } else {
             // MBR mode: no GPT partitions
             memset(buffer, 0, SECTOR_SIZE);
         }
+        return true;
+    }
+
+    // BIOS boot loader stage 2 (in the gap before the partition)
+    if(bios_boot_is_stage2_sector(lba)) {
+        BiosBootParams params = {0};
+        if(vfat->bios_kernel_index >= 0) {
+            VirtualFatFile* kernel = &vfat->files[vfat->bios_kernel_index];
+            params.kernel_lba = data_start + (kernel->start_cluster - 2) * SECTORS_PER_CLUSTER;
+            params.kernel_size = kernel->size;
+        }
+        if(vfat->bios_initrd_index >= 0) {
+            VirtualFatFile* initrd = &vfat->files[vfat->bios_initrd_index];
+            params.initrd_lba = data_start + (initrd->start_cluster - 2) * SECTORS_PER_CLUSTER;
+            params.initrd_size = initrd->size;
+        }
+        bios_boot_read_stage2_sector(lba, &params, buffer);
         return true;
     }
 
@@ -908,7 +1014,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
             // Only first sector of backup partition array has data (like primary)
             if(lba == GPT_BACKUP_ARRAY_START) {
                 generate_gpt_backup_partitions(buffer, PARTITION_START, PARTITION_SECTORS);
-                FURI_LOG_D(TAG, "Generated backup GPT partitions at LBA %lu", lba);
+                B2F_LOG_D(TAG, "Generated backup GPT partitions at LBA %lu", lba);
             } else {
                 memset(buffer, 0, SECTOR_SIZE);
             }
@@ -918,7 +1024,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
         // Backup GPT header: GPT_BACKUP_HEADER
         if(lba == GPT_BACKUP_HEADER) {
             generate_gpt_backup_header(buffer, TOTAL_SECTORS, PARTITION_START, PARTITION_SECTORS);
-            FURI_LOG_D(TAG, "Generated backup GPT header at LBA %lu", lba);
+            B2F_LOG_D(TAG, "Generated backup GPT header at LBA %lu", lba);
             return true;
         }
     }
@@ -931,7 +1037,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // FS Info sector at LBA 2
     if(lba == PARTITION_START + 1) {
-        generate_fsinfo_sector(buffer);
+        generate_fsinfo_sector(buffer, free_clusters, vfat->next_cluster);
         return true;
     }
 
@@ -943,7 +1049,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // Backup FS Info sector at LBA 8
     if(lba == PARTITION_START + 7) {
-        generate_fsinfo_sector(buffer);
+        generate_fsinfo_sector(buffer, free_clusters, vfat->next_cluster);
         return true;
     }
 
@@ -1000,7 +1106,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
                     uint32_t file_sector = file_cluster * SECTORS_PER_CLUSTER + sector_in_cluster;
                     uint32_t offset = file_sector * SECTOR_SIZE;
 
-                    FURI_LOG_I(
+                    B2F_LOG_IO(
                         TAG,
                         "Reading file %.11s at cluster %lu, offset %lu, size %lu",
                         file->name,
@@ -1034,40 +1140,15 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
                         if(file->source_type == FILE_SOURCE_MEMORY) {
                             // Read from RAM
-                            FURI_LOG_D(
+                            B2F_LOG_IO(
                                 TAG,
                                 "Reading %lu bytes from memory at offset %lu",
                                 copy_size,
                                 offset);
                             memcpy(buffer, file->memory_data + offset, copy_size);
                         } else if(file->source_type == FILE_SOURCE_SD_CARD) {
-                            // Stream from SD card
-                            File* sd_file = storage_file_alloc(storage);
-
-                            if(storage_file_open(
-                                   sd_file,
-                                   furi_string_get_cstr(file->sd_path),
-                                   FSAM_READ,
-                                   FSOM_OPEN_EXISTING)) {
-                                storage_file_seek(sd_file, offset, true);
-                                uint16_t bytes_read =
-                                    storage_file_read(sd_file, buffer, copy_size);
-                                if(bytes_read != copy_size) {
-                                    FURI_LOG_W(
-                                        TAG,
-                                        "SD read mismatch: expected %lu, got %u",
-                                        copy_size,
-                                        bytes_read);
-                                }
-                                storage_file_close(sd_file);
-                            } else {
-                                FURI_LOG_E(
-                                    TAG,
-                                    "Failed to open SD file: %s",
-                                    furi_string_get_cstr(file->sd_path));
-                            }
-
-                            storage_file_free(sd_file);
+                            // Stream from SD card (zeros on failure)
+                            sd_file_read(storage, vfat, i, offset, buffer, copy_size);
                         }
                     }
 
@@ -1092,8 +1173,39 @@ uint32_t virtual_fat_get_total_sectors(VirtualFat* vfat) {
 void virtual_fat_set_partition_scheme(VirtualFat* vfat, PartitionScheme scheme) {
     if(vfat == NULL) return;
     vfat->partition_scheme = scheme;
-    FURI_LOG_I(
+    B2F_LOG_I(
         TAG, "Partition scheme set to: %s", scheme == PARTITION_SCHEME_MBR_ONLY ? "MBR" : "GPT");
+}
+
+static int8_t find_root_file(VirtualFat* vfat, const char* filename) {
+    for(uint8_t i = 0; i < vfat->file_count; i++) {
+        VirtualFatFile* file = &vfat->files[i];
+        if(!file->is_directory && file->parent_index == -1 &&
+           strcmp(file->long_name, filename) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool virtual_fat_set_bios_boot_files(
+    VirtualFat* vfat,
+    const char* kernel_filename,
+    const char* initrd_filename) {
+    if(vfat == NULL) return false;
+
+    vfat->bios_kernel_index = find_root_file(vfat, kernel_filename);
+    vfat->bios_initrd_index = initrd_filename ? find_root_file(vfat, initrd_filename) : -1;
+
+    if(vfat->bios_kernel_index < 0) {
+        B2F_LOG_E(TAG, "BIOS boot kernel not found: %s", kernel_filename);
+        return false;
+    }
+    if(initrd_filename && vfat->bios_initrd_index < 0) {
+        B2F_LOG_E(TAG, "BIOS boot initrd not found: %s", initrd_filename);
+        return false;
+    }
+    return true;
 }
 
 void virtual_fat_set_read_callback(

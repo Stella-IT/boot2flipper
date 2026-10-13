@@ -3,6 +3,7 @@
 #include <usb.h>
 #include <usbd_core.h>
 #include <string.h>
+#include "../log.h"
 
 #define TAG "UsbMsc"
 
@@ -232,7 +233,7 @@ static void usb_msc_ep_callback(usbd_device* dev, uint8_t event, uint8_t ep) {
 static int32_t mass_thread_worker(void* context) {
     UsbMscContext* ctx = (UsbMscContext*)context;
 
-    FURI_LOG_I(TAG, "Worker thread started");
+    B2F_LOG_I(TAG, "Worker thread started");
 
     // Store thread ID for callbacks
     ctx->thread_id = furi_thread_get_current_id();
@@ -244,13 +245,13 @@ static int32_t mass_thread_worker(void* context) {
 
         // Check for exit
         if(flags & EventExit) {
-            FURI_LOG_I(TAG, "Worker thread exiting");
+            B2F_LOG_I(TAG, "Worker thread exiting");
             break;
         }
 
         // Check for reset
         if(flags & EventReset) {
-            FURI_LOG_D(TAG, "Reset event");
+            B2F_LOG_D(TAG, "Reset event");
             ctx->state = MSC_STATE_READ_CBW;
             ctx->tx_offset = 0;
             ctx->tx_len = 0;
@@ -273,14 +274,14 @@ static int32_t mass_thread_worker(void* context) {
                 }
 
                 if(len != sizeof(UsbMscCbw) || ctx->cbw.dSignature != USB_MSC_CBW_SIGNATURE) {
-                    FURI_LOG_E(TAG, "Invalid CBW: len=%ld, sig=0x%08lX", len, ctx->cbw.dSignature);
+                    B2F_LOG_E(TAG, "Invalid CBW: len=%ld, sig=0x%08lX", len, ctx->cbw.dSignature);
                     usbd_ep_stall(dev, USB_MSC_EP_IN);
                     usbd_ep_stall(dev, USB_MSC_EP_OUT);
                     ctx->state = MSC_STATE_READ_CBW;
                     break;
                 }
 
-                FURI_LOG_D(
+                B2F_LOG_D(
                     TAG,
                     "CBW: cmd=0x%02X, datalen=%lu, flags=0x%02X, tag=%lu",
                     ctx->cbw.CB[0],
@@ -292,7 +293,7 @@ static int32_t mass_thread_worker(void* context) {
                 bool cmd_ok = usb_scsi_process_command(ctx->scsi, ctx->cbw.CB, ctx->cbw.bCBLength);
 
                 if(!cmd_ok) {
-                    FURI_LOG_W(TAG, "SCSI command failed");
+                    B2F_LOG_W(TAG, "SCSI command failed");
                     ctx->csw.bStatus = USB_MSC_CSW_STATUS_FAILED;
 
                     // Send CSW immediately for failed commands
@@ -301,7 +302,7 @@ static int32_t mass_thread_worker(void* context) {
                     ctx->csw.dDataResidue = ctx->cbw.dDataLength;
 
                     usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                    FURI_LOG_D(TAG, "CSW sent (failed): status=%u", ctx->csw.bStatus);
+                    B2F_LOG_D(TAG, "CSW sent (failed): status=%u", ctx->csw.bStatus);
 
                     ctx->state = MSC_STATE_READ_CBW;
                     break;
@@ -311,7 +312,7 @@ static int32_t mass_thread_worker(void* context) {
                 if(ctx->cbw.dDataLength > 0) {
                     if(ctx->cbw.bmFlags & 0x80) {
                         // Data IN (device to host)
-                        FURI_LOG_D(TAG, "Transitioning to DATA_IN state, fall through");
+                        B2F_LOG_D(TAG, "Transitioning to DATA_IN state, fall through");
                         ctx->state = MSC_STATE_DATA_IN;
                         ctx->tx_offset = 0;
                         // Fall through to DATA_IN case immediately
@@ -331,7 +332,7 @@ static int32_t mass_thread_worker(void* context) {
                     ctx->csw.dDataResidue = 0;
 
                     usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                    FURI_LOG_D(TAG, "CSW sent (no data): status=%u", ctx->csw.bStatus);
+                    B2F_LOG_D(TAG, "CSW sent (no data): status=%u", ctx->csw.bStatus);
 
                     ctx->state = MSC_STATE_READ_CBW;
                     break;
@@ -343,7 +344,7 @@ static int32_t mass_thread_worker(void* context) {
                 // Check if SCSI layer has more data to send
                 if(!usb_scsi_has_tx_data(ctx->scsi)) {
                     // Data transfer complete
-                    FURI_LOG_D(TAG, "Data IN complete, total sent: %lu bytes", ctx->tx_offset);
+                    B2F_LOG_D(TAG, "Data IN complete, total sent: %lu bytes", ctx->tx_offset);
                     ctx->csw.bStatus = USB_MSC_CSW_STATUS_PASSED;
 
                     // Prepare and send CSW
@@ -357,7 +358,7 @@ static int32_t mass_thread_worker(void* context) {
                     ctx->csw.dDataResidue = residue;
 
                     if(residue > 0) {
-                        FURI_LOG_W(
+                        B2F_LOG_W(
                             TAG,
                             "Data residue: expected=%lu, sent=%lu, residue=%lu",
                             ctx->cbw.dDataLength,
@@ -366,7 +367,7 @@ static int32_t mass_thread_worker(void* context) {
                     }
 
                     usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                    FURI_LOG_D(
+                    B2F_LOG_D(
                         TAG,
                         "CSW sent: status=%u, tag=%lu, residue=%lu",
                         ctx->csw.bStatus,
@@ -386,7 +387,7 @@ static int32_t mass_thread_worker(void* context) {
 
                     if(ctx->tx_len == 0) {
                         // Unexpected: SCSI said it has data but returned 0 bytes
-                        FURI_LOG_E(TAG, "SCSI TX failed despite has_tx_data=true");
+                        B2F_LOG_E(TAG, "SCSI TX failed despite has_tx_data=true");
                         ctx->csw.bStatus = USB_MSC_CSW_STATUS_FAILED;
 
                         // Send error CSW
@@ -400,7 +401,7 @@ static int32_t mass_thread_worker(void* context) {
                         ctx->csw.dDataResidue = residue;
 
                         usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                        FURI_LOG_D(
+                        B2F_LOG_D(
                             TAG,
                             "CSW sent (error): status=%u, tag=%lu, residue=%lu",
                             ctx->csw.bStatus,
@@ -416,11 +417,11 @@ static int32_t mass_thread_worker(void* context) {
 
                 // Try to send buffered data
                 if(ctx->tx_len > 0) {
-                    // FURI_LOG_D(TAG, "Sending %lu bytes (offset=%lu)", ctx->tx_len, ctx->tx_offset);
+                    // B2F_LOG_D(TAG, "Sending %lu bytes (offset=%lu)", ctx->tx_len, ctx->tx_offset);
                     int32_t result =
                         usbd_ep_write(dev, USB_MSC_EP_IN, ctx->tx_buffer, ctx->tx_len);
                     if(result < 0) {
-                        FURI_LOG_D(TAG, "usbd_ep_write busy, will retry");
+                        B2F_LOG_D(TAG, "usbd_ep_write busy, will retry");
                         // Endpoint busy - keep data in buffer and retry on next event
                         break;
                     }
@@ -451,7 +452,7 @@ static int32_t mass_thread_worker(void* context) {
                         ctx->csw.dDataResidue = 0;
 
                         usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                        FURI_LOG_D(TAG, "CSW sent: status=%u", ctx->csw.bStatus);
+                        B2F_LOG_D(TAG, "CSW sent: status=%u", ctx->csw.bStatus);
 
                         ctx->state = MSC_STATE_READ_CBW;
                     }
@@ -468,7 +469,7 @@ static int32_t mass_thread_worker(void* context) {
                 // bStatus already set
 
                 usbd_ep_write(dev, USB_MSC_EP_IN, &ctx->csw, sizeof(UsbMscCsw));
-                FURI_LOG_D(TAG, "CSW sent: status=%u", ctx->csw.bStatus);
+                B2F_LOG_D(TAG, "CSW sent: status=%u", ctx->csw.bStatus);
 
                 ctx->state = MSC_STATE_READ_CBW;
                 break;
@@ -483,39 +484,39 @@ static int32_t mass_thread_worker(void* context) {
     }
 
     ctx->thread_id = NULL;
-    FURI_LOG_I(TAG, "Worker thread exited");
+    B2F_LOG_I(TAG, "Worker thread exited");
     return 0;
 }
 
 // USB interface initialization callbacks
 static void msc_init(usbd_device* dev, FuriHalUsbInterface* intf, void* ctx) {
-    FURI_LOG_I(TAG, "msc_init called: dev=%p, intf=%p, ctx=%p", dev, intf, ctx);
+    B2F_LOG_I(TAG, "msc_init called: dev=%p, intf=%p, ctx=%p", dev, intf, ctx);
     UNUSED(intf);
     UNUSED(ctx);
 
     UsbMscContext* msc_ctx = g_msc_ctx;
     if(msc_ctx == NULL) {
-        FURI_LOG_E(TAG, "MSC context not set in msc_init");
+        B2F_LOG_E(TAG, "MSC context not set in msc_init");
         return;
     }
 
-    FURI_LOG_D(TAG, "Storing USB device: %p", dev);
+    B2F_LOG_D(TAG, "Storing USB device: %p", dev);
     // Store USB device
     msc_ctx->usb_dev = dev;
 
-    FURI_LOG_D(TAG, "Registering control callback");
+    B2F_LOG_D(TAG, "Registering control callback");
     // Register control callback
     usbd_reg_control(dev, usb_msc_control);
 
-    FURI_LOG_D(TAG, "Registering config callback");
+    B2F_LOG_D(TAG, "Registering config callback");
     // Register config callback
     usbd_reg_config(dev, usb_msc_config);
 
-    FURI_LOG_D(TAG, "Connecting USB");
+    B2F_LOG_D(TAG, "Connecting USB");
     // Connect USB (descriptors handled by FuriHalUsbInterface)
     usbd_connect(dev, true);
 
-    FURI_LOG_I(TAG, "USB MSC interface initialized successfully");
+    B2F_LOG_I(TAG, "USB MSC interface initialized successfully");
 }
 
 static void msc_deinit(usbd_device* dev) {
@@ -535,7 +536,7 @@ static void msc_deinit(usbd_device* dev) {
 
     msc_ctx->usb_dev = NULL;
 
-    FURI_LOG_I(TAG, "USB MSC interface deinitialized");
+    B2F_LOG_I(TAG, "USB MSC interface deinitialized");
 }
 
 static void msc_on_wakeup(usbd_device* dev) {
@@ -561,16 +562,16 @@ static FuriHalUsbInterface usb_msc_interface = {
 
 bool usb_msc_start(UsbMscContext* ctx) {
     if(ctx == NULL || ctx->scsi == NULL) {
-        FURI_LOG_E(TAG, "Invalid context: ctx=%p, scsi=%p", ctx, ctx ? ctx->scsi : NULL);
+        B2F_LOG_E(TAG, "Invalid context: ctx=%p, scsi=%p", ctx, ctx ? ctx->scsi : NULL);
         return false;
     }
 
     if(ctx->active) {
-        FURI_LOG_W(TAG, "Already active");
+        B2F_LOG_W(TAG, "Already active");
         return true;
     }
 
-    FURI_LOG_I(TAG, "Starting USB MSC...");
+    B2F_LOG_I(TAG, "Starting USB MSC...");
 
     // Set global context for callbacks
     g_msc_ctx = ctx;
@@ -578,20 +579,20 @@ bool usb_msc_start(UsbMscContext* ctx) {
     // Create worker thread
     ctx->thread = furi_thread_alloc_ex("UsbMscWorker", 2048, mass_thread_worker, ctx);
     if(ctx->thread == NULL) {
-        FURI_LOG_E(TAG, "Failed to allocate worker thread");
+        B2F_LOG_E(TAG, "Failed to allocate worker thread");
         g_msc_ctx = NULL;
         return false;
     }
 
     // Save current USB mode so we can restore it later
-    FURI_LOG_D(TAG, "Saving current USB mode...");
+    B2F_LOG_D(TAG, "Saving current USB mode...");
     ctx->prev_usb_mode = (FuriHalUsbInterface*)furi_hal_usb_get_config();
 
     // Set USB configuration to MSC interface (it will handle locking internally)
-    FURI_LOG_D(TAG, "Setting USB MSC config...");
+    B2F_LOG_D(TAG, "Setting USB MSC config...");
     bool result = furi_hal_usb_set_config(&usb_msc_interface, NULL);
     if(!result) {
-        FURI_LOG_E(TAG, "furi_hal_usb_set_config returned false - interface rejected");
+        B2F_LOG_E(TAG, "furi_hal_usb_set_config returned false - interface rejected");
 
         // Cleanup thread
         furi_thread_free(ctx->thread);
@@ -599,7 +600,7 @@ bool usb_msc_start(UsbMscContext* ctx) {
 
         // Restore previous USB mode
         if(ctx->prev_usb_mode != NULL) {
-            FURI_LOG_D(TAG, "Restoring previous mode: %p", ctx->prev_usb_mode);
+            B2F_LOG_D(TAG, "Restoring previous mode: %p", ctx->prev_usb_mode);
             furi_hal_usb_set_config(ctx->prev_usb_mode, NULL);
         }
 
@@ -611,7 +612,7 @@ bool usb_msc_start(UsbMscContext* ctx) {
     // Start worker thread
     furi_thread_start(ctx->thread);
 
-    FURI_LOG_I(TAG, "USB MSC started successfully with worker thread");
+    B2F_LOG_I(TAG, "USB MSC started successfully with worker thread");
     ctx->active = true;
 
     return true;
@@ -622,7 +623,7 @@ void usb_msc_stop(UsbMscContext* ctx) {
         return;
     }
 
-    FURI_LOG_I(TAG, "Stopping USB MSC...");
+    B2F_LOG_I(TAG, "Stopping USB MSC...");
 
     // Signal worker thread to exit
     if(ctx->thread_id != NULL) {
@@ -638,12 +639,12 @@ void usb_msc_stop(UsbMscContext* ctx) {
 
     // Restore previous USB mode
     if(ctx->prev_usb_mode != NULL) {
-        FURI_LOG_D(TAG, "Restoring previous USB mode: %p", ctx->prev_usb_mode);
+        B2F_LOG_D(TAG, "Restoring previous USB mode: %p", ctx->prev_usb_mode);
         furi_hal_usb_set_config(ctx->prev_usb_mode, NULL);
         ctx->prev_usb_mode = NULL;
     } else {
         // No previous mode saved, just disable USB MSC
-        FURI_LOG_D(TAG, "No previous mode saved, disabling USB");
+        B2F_LOG_D(TAG, "No previous mode saved, disabling USB");
         furi_hal_usb_set_config(NULL, NULL);
     }
 
@@ -651,7 +652,7 @@ void usb_msc_stop(UsbMscContext* ctx) {
     ctx->active = false;
     ctx->state = MSC_STATE_IDLE;
 
-    FURI_LOG_I(TAG, "USB MSC stopped");
+    B2F_LOG_I(TAG, "USB MSC stopped");
 }
 
 bool usb_msc_is_active(UsbMscContext* ctx) {

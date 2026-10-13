@@ -1,5 +1,6 @@
 #include "script_generator.h"
 #include <string.h>
+#include "../log.h"
 
 #define TAG "iPXEScript"
 
@@ -61,14 +62,14 @@ FuriString* ipxe_script_generate_dhcp(
     furi_string_cat_printf(script, ":end\n");
 
     if(has_interface) {
-        FURI_LOG_I(
+        B2F_LOG_I(
             TAG,
             "Generated DHCP script for %s, chainload: %s, size: %zu bytes",
             iface,
             chainload_enabled ? "enabled" : "disabled",
             furi_string_size(script));
     } else {
-        FURI_LOG_I(
+        B2F_LOG_I(
             TAG,
             "Generated DHCP script (auto-detect), chainload: %s, size: %zu bytes",
             chainload_enabled ? "enabled" : "disabled",
@@ -138,7 +139,7 @@ FuriString* ipxe_script_generate_static(
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, ":end\n");
 
-    FURI_LOG_I(
+    B2F_LOG_I(
         TAG,
         "Generated static IP script for %s, chainload: %s, size: %zu bytes",
         iface,

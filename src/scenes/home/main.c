@@ -6,6 +6,7 @@
 #include "../../config/config.h"
 #include "../usb_mass_storage/usb_mass_storage.h"
 #include "main.h"
+#include "../../log.h"
 
 #define THIS_SCENE Home
 #define TAG        "Home"
@@ -172,7 +173,7 @@ static void Home_file_browser_callback(void* context) {
     App* app = (App*)context;
     AppHome* home = app->allocated_scenes[THIS_SCENE];
 
-    FURI_LOG_I(TAG, "File selected: %s", furi_string_get_cstr(home->browser_result));
+    B2F_LOG_I(TAG, "File selected: %s", furi_string_get_cstr(home->browser_result));
 
     config_load(app->storage, app->config, furi_string_get_cstr(home->browser_result));
     furi_string_set(app->config_file, furi_string_get_cstr(home->browser_result));
