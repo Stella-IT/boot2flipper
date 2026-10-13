@@ -5,13 +5,13 @@
 
 #define KEY_ROWS      3
 #define KEY_COLUMNS   12 // Character keys per row
-#define KEY_WIDTH     9
+#define KEY_WIDTH     8
 #define KEY_HEIGHT    11
 #define KEYS_X        1
 #define KEYS_Y        27 // Top of the first key row
-#define SPECIAL_X     (KEYS_X + KEY_COLUMNS * KEY_WIDTH + 1)
-#define SPECIAL_WIDTH (128 - SPECIAL_X - 1)
-#define SPECIAL_COL   KEY_COLUMNS // Column index of the DEL/layer/OK keys
+#define SPECIAL_WIDTH 26
+#define SPECIAL_X     (127 - SPECIAL_WIDTH)
+#define SPECIAL_COL   KEY_COLUMNS // Column index of the backspace/layer/save keys
 
 typedef enum {
     UrlInputLayerLower,
@@ -76,6 +76,14 @@ static void url_input_draw_text(Canvas* canvas, UrlInputModel* model) {
     canvas_draw_line(canvas, cursor_x, 14, cursor_x, 22);
 }
 
+// Left arrow with a filled head and a 2px shaft on rows y - 1 and y
+static void url_input_draw_backspace_arrow(Canvas* canvas, int32_t x, int32_t y) {
+    for(int32_t i = 0; i < 3; i++) {
+        canvas_draw_line(canvas, x + i, y - 1 - i, x + i, y + i);
+    }
+    canvas_draw_box(canvas, x + 3, y - 1, 10, 2);
+}
+
 static void url_input_draw_callback(Canvas* canvas, void* _model) {
     UrlInputModel* model = _model;
     canvas_clear(canvas);
@@ -100,12 +108,8 @@ static void url_input_draw_callback(Canvas* canvas, void* _model) {
         }
     }
 
-    // DEL, layer and OK keys on the right
-    canvas_set_font(canvas, FontSecondary);
+    // Backspace, layer and save keys on the right, styled like the stock keyboard
     for(uint8_t row = 0; row < KEY_ROWS; row++) {
-        const char* label = row == SpecialKeyDelete ? "DEL" :
-                            row == SpecialKeyLayer  ? layer_labels[model->layer] :
-                                                      "OK";
         int32_t y = KEYS_Y + row * (KEY_HEIGHT + 1);
         bool selected = model->row == row && model->col == SPECIAL_COL;
 
@@ -115,8 +119,23 @@ static void url_input_draw_callback(Canvas* canvas, void* _model) {
         } else {
             canvas_draw_rframe(canvas, SPECIAL_X, y, SPECIAL_WIDTH, KEY_HEIGHT, 2);
         }
-        canvas_draw_str_aligned(
-            canvas, SPECIAL_X + SPECIAL_WIDTH / 2, y + 2, AlignCenter, AlignTop, label);
+
+        canvas_set_font(canvas, FontSecondary);
+        if(row == SpecialKeyDelete) {
+            url_input_draw_backspace_arrow(canvas, SPECIAL_X + 7, y + 6);
+        } else if(row == SpecialKeyLayer) {
+            canvas_draw_str_aligned(
+                canvas,
+                SPECIAL_X + SPECIAL_WIDTH / 2,
+                y + 9,
+                AlignCenter,
+                AlignBottom,
+                layer_labels[model->layer]);
+        } else {
+            // No ascenders, so sit one pixel higher to look centered
+            canvas_draw_str_aligned(
+                canvas, SPECIAL_X + SPECIAL_WIDTH / 2, y + 8, AlignCenter, AlignBottom, "save");
+        }
         canvas_set_color(canvas, ColorBlack);
     }
 }

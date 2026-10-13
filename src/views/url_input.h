@@ -9,7 +9,7 @@
  * This keyboard has three layers (lowercase, uppercase, digits/symbols), with
  * '.', '/', ':' and '-' on the letter layers too.
  *
- * Keys: OK types, long OK types the other case (or clears all on DEL),
+ * Keys: OK types, long OK types the other case (or clears all on backspace),
  * long/repeat Back deletes, short Back leaves without saving.
  */
 typedef struct UrlInput UrlInput;
@@ -25,7 +25,7 @@ View* url_input_get_view(UrlInput* url_input);
 void url_input_set_header_text(UrlInput* url_input, const char* text);
 
 /**
- * Edit text_buffer in place; callback is called when OK is pressed on the OK key
+ * Edit text_buffer in place; callback is called when OK is pressed on the save key
  * @param text_buffer Buffer holding the initial text, edited in place
  * @param text_buffer_size Buffer size including the terminating NUL
  */
