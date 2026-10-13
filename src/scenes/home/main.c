@@ -28,6 +28,7 @@ AppHome* Home_alloc() {
     AppHome* home = (AppHome*)malloc(sizeof(AppHome));
     home->var_item_list = variable_item_list_alloc();
     home->text_input = text_input_alloc();
+    home->url_input = url_input_alloc();
 
     home->browser_result = furi_string_alloc();
     home->file_browser = file_browser_alloc(home->browser_result);
@@ -62,6 +63,10 @@ void Home_free(void* ptr) {
         text_input_free(home->text_input);
     }
 
+    if(home->url_input != NULL) {
+        url_input_free(home->url_input);
+    }
+
     if(home->var_item_list != NULL) {
         variable_item_list_free(home->var_item_list);
     }
@@ -78,6 +83,8 @@ View* Home_get_view(void* ptr) {
         return variable_item_list_get_view(home->var_item_list);
     case HOME_VIEW_TEXT_INPUT:
         return text_input_get_view(home->text_input);
+    case HOME_VIEW_URL_INPUT:
+        return url_input_get_view(home->url_input);
     case HOME_VIEW_FILE_BROWSER:
         return file_browser_get_view(home->file_browser);
     default:
@@ -318,19 +325,19 @@ static void Home_enter_callback(void* context, uint32_t index) {
             sizeof(home->text_buffer) - 1);
         home->text_buffer[sizeof(home->text_buffer) - 1] = '\0';
 
-        text_input_set_header_text(home->text_input, "Enter Chainload URL");
-        text_input_set_result_callback(
-            home->text_input,
+        // Stock TextInput has no ':' or '/', so use the URL keyboard
+        url_input_set_header_text(home->url_input, "Enter Chainload URL");
+        url_input_set_result_callback(
+            home->url_input,
             Home_text_input_callback,
             app,
             home->text_buffer,
-            sizeof(home->text_buffer),
-            true);
+            sizeof(home->text_buffer));
 
         home->is_save_mode = false;
         home->is_network_interface_mode = false;
-        home->current_view = HOME_VIEW_TEXT_INPUT;
-        view_dispatcher_switch_to_view(app->view_dispatcher, HOME_VIEW_TEXT_INPUT);
+        home->current_view = HOME_VIEW_URL_INPUT;
+        view_dispatcher_switch_to_view(app->view_dispatcher, HOME_VIEW_URL_INPUT);
         break;
 
     case HOME_MENU_ITEM_START: {
@@ -371,6 +378,8 @@ void Home_on_enter(void* context) {
         view_dispatcher_add_view(
             app->view_dispatcher, HOME_VIEW_TEXT_INPUT, text_input_get_view(home->text_input));
         view_dispatcher_add_view(
+            app->view_dispatcher, HOME_VIEW_URL_INPUT, url_input_get_view(home->url_input));
+        view_dispatcher_add_view(
             app->view_dispatcher,
             HOME_VIEW_FILE_BROWSER,
             file_browser_get_view(home->file_browser));
@@ -390,6 +399,7 @@ bool Home_on_event(void* context, SceneManagerEvent event) {
     if(event.type == SceneManagerEventTypeBack) {
         // If we're in a sub-view (text input or file browser), return to main list
         if(home->current_view == HOME_VIEW_TEXT_INPUT ||
+           home->current_view == HOME_VIEW_URL_INPUT ||
            home->current_view == HOME_VIEW_FILE_BROWSER) {
             home->current_view = HOME_VIEW_MAIN_LIST;
             view_dispatcher_switch_to_view(app->view_dispatcher, HOME_VIEW_MAIN_LIST);

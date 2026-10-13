@@ -6,6 +6,7 @@
 #include <gui/modules/text_input.h>
 #include <gui/modules/file_browser.h>
 #include <dialogs/dialogs.h>
+#include "../../views/url_input.h"
 
 typedef enum {
     HOME_MENU_ITEM_LOAD,
@@ -23,6 +24,7 @@ typedef enum {
     HOME_VIEW_MAIN_LIST = 100,
     HOME_VIEW_TEXT_INPUT = 101,
     HOME_VIEW_FILE_BROWSER = 102,
+    HOME_VIEW_URL_INPUT = 103,
 } HomeView;
 
 typedef enum {
@@ -32,6 +34,7 @@ typedef enum {
 typedef struct {
     VariableItemList* var_item_list;
     TextInput* text_input;
+    UrlInput* url_input;
     FileBrowser* file_browser;
     FuriString* browser_result;
 
@@ -43,7 +46,7 @@ typedef struct {
     VariableItem* chainload_url_item;
 
     HomeView current_view;
-    char text_buffer[128];
+    char text_buffer[256];
     bool is_save_mode;
     bool is_network_interface_mode;
 } AppHome;

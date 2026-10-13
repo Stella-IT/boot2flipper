@@ -110,10 +110,11 @@ void free_scenes(App* app) {
     app->allocated_scenes = NULL;
 
     B2F_LOG_I(APP_NAME, "Removing Home's custom views from dispatcher");
-    // Home scene registers custom views with IDs 100, 101, 102 that need to be removed
+    // Home scene registers custom views with IDs 100-103 that need to be removed
     view_dispatcher_remove_view(app->view_dispatcher, 100); // HOME_VIEW_MAIN_LIST
     view_dispatcher_remove_view(app->view_dispatcher, 101); // HOME_VIEW_TEXT_INPUT
     view_dispatcher_remove_view(app->view_dispatcher, 102); // HOME_VIEW_FILE_BROWSER
+    view_dispatcher_remove_view(app->view_dispatcher, 103); // HOME_VIEW_URL_INPUT
     B2F_LOG_I(APP_NAME, "Home's custom views removed");
 
     B2F_LOG_I(APP_NAME, "Freeing View dispatcher.");

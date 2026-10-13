@@ -57,6 +57,7 @@ If you modify the loader, run `tools/bios_boot/build.sh` to regenerate `src/disk
 5. Select `Boot Method`. `MBR` or `UEFI`
 6. If you want to drop to iPXE shell, Set Chainload to `Disabled`.
    1. Else, Set the ChainloadURL to your desired URL.
+      The URL keyboard has `.`, `/`, `:`, `-` on the letter layers; the `ABC`/`123`/`abc` key switches to uppercase and digits/symbols. Long press OK types the other case, long press `DEL` clears the text.
 7. (Optional) Save configuration to SD card
 8. Press `Start` button to start emulating USB Mass Storage device
 9. On your PC, Select Boot Device labelled as `FLIPPER Boot2Flipper 1.0` or similar.
