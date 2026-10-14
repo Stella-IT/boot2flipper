@@ -44,8 +44,9 @@ The root directory is at LBA 0x2000, and 0x2001-0x20FF is reserved for a hidden 
 | File | LBA | Size | Content |
 | --- | --- | --- | --- |
 | `.B2F/info` | 0x2002 | 512 bytes | Read-only header, starts with the magic `B2F INFO` (see below) |
-| `.B2F/status` | 0x2003 | 512 bytes | ASCII text shown on the Flipper, up to the first NUL (3 lines) |
-| `.B2F/frame` | 0x2004 | 1024 bytes | 128x64 1-bit image shown full screen. Rows of 16 bytes, least significant bit is the leftmost pixel (XBM), 1 is black |
+| `.B2F/status` | 0x2003 | 512 bytes | ASCII text shown in `status` mode, up to the first NUL (3 lines) |
+| `.B2F/frame` | 0x2004 | 1024 bytes | 128x64 1-bit image shown full screen in `framebuffer` mode. Rows of 16 bytes, least significant bit is the leftmost pixel (XBM), 1 is black |
+| `.B2F/mode` | 0x2006 | 512 bytes | What the Flipper shows, an ASCII word: `status` (default, also for unknown words) or `framebuffer` |
 
 The LBAs are the same for every boot method. To find the disk (or the area, if the layout ever changes), look for the magic in `info`. Its layout, little-endian:
 
@@ -56,7 +57,7 @@ The LBAs are the same for every boot method. To find the disk (or the area, if t
 | 10 | 2 | Entry count |
 | 16 | 32 each | Entry: name (16, NUL padded), LBA (4), size in bytes (4), flags (4, bit 0 = writable), reserved (4) |
 
-Write the frame's 2 sectors in one command, so it isn't shown half updated. An all-zero frame shows the Flipper's own screen again.  
+Write the frame's 2 sectors in one command, so it isn't shown half updated. 0x2007-0x201F is kept for more files (e.g. a prompt), the writers are in `.B2F/bin` from 0x2020.  
 Other writes don't change the disk: the free space is marked as bad clusters, so operating systems see a full disk and can't add files, and writes outside `.B2F` are dropped.
 
 #### From iPXE
@@ -65,10 +66,11 @@ The generated script sets `${b2f}` to a writer on the disk (`.B2F/bin/b2f.efi` o
 ```
 imgexec ${b2f} status Downloading kernel...\nPlease wait
 imgexec ${b2f} frame logo.bin
+imgexec ${b2f} mode framebuffer
 imgexec ${b2f} clear
 ```
 
-`\n` starts a new line. For `frame`, UEFI reads an image fetched with `imgfetch http://server/logo.bin logo.bin`, BIOS opens the given URI (e.g. `http://server/logo.bin`).
+`\n` starts a new line. `clear` empties the status and frame and goes back to `status` mode. For `frame`, UEFI reads an image fetched with `imgfetch http://server/logo.bin logo.bin`, BIOS opens the given URI (e.g. `http://server/logo.bin`).
 This needs the `-legacy` iPXE builds: the current `ipxe.efi` and `ipxe.lkrn` take over the USB controller, so the Flipper's disk is gone once iPXE runs (booting still works, the writer then fails with an error).
 The writers are built with `tools/b2f_efi/build.sh` and `tools/b2f_pxe/build.sh`.
 

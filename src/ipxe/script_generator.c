@@ -10,7 +10,8 @@
 // so imgexec fails: left empty, imgexec would run the current script again.
 static void append_b2f_setup(FuriString* script, bool bios_writer) {
     furi_string_cat_printf(
-        script, "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | clear\n");
+        script,
+        "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | mode <mode> | clear\n");
     furi_string_cat_printf(script, "set b2f file:/%s/unavailable\n", B2F_BIN_PATH);
     furi_string_cat_printf(
         script,

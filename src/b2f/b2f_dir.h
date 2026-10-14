@@ -20,15 +20,23 @@
  *                     u32 lba, u32 size in bytes, u32 flags (B2F_INFO_WRITABLE),
  *                     u32 reserved
  *                All numbers are little-endian.
+ *   .B2F/mode    B2F_MODE_LBA, B2F_MODE_SIZE bytes
+ *                What the Flipper shows: an ASCII word, up to the first NUL,
+ *                space or newline. B2F_MODE_STATUS (the default, also for
+ *                unknown words) or B2F_MODE_FRAMEBUFFER.
  *   .B2F/status  B2F_STATUS_LBA, B2F_STATUS_SIZE bytes
- *                ASCII text shown on the Flipper, up to the first NUL.
+ *                ASCII text shown in status mode, up to the first NUL.
  *   .B2F/frame   B2F_FRAME_LBA, B2F_FRAME_SIZE bytes
- *                128x64 1-bit frame shown on the Flipper while not all zero.
+ *                128x64 1-bit frame shown full screen in framebuffer mode.
  *                Rows of 16 bytes from the top, least significant bit is the
  *                leftmost pixel (XBM, as canvas_draw_xbm takes), 1 is black.
  *   .B2F/bin/b2f.efi, .B2F/bin/b2f.pxe
- *                Write status/frame from iPXE on UEFI and BIOS, see tools/b2f_efi
+ *                Write the files from iPXE on UEFI and BIOS, see tools/b2f_efi
  *                and tools/b2f_pxe. The BIOS loader passes b2f.pxe as initrd.
+ *
+ * The sectors between .B2F/mode and .B2F/bin are kept for more files, e.g.
+ * .B2F/prompt/ (question, type, options, kbdtype written by the host, answer
+ * written by the Flipper).
  */
 #define B2F_DIR_PATH      ".B2F"
 #define B2F_BIN_PATH      B2F_DIR_PATH "/bin"
@@ -38,6 +46,9 @@
 #define B2F_INFO_VERSION  1
 #define B2F_INFO_WRITABLE 0x01
 
+#define B2F_MODE_STATUS      "status"
+#define B2F_MODE_FRAMEBUFFER "framebuffer"
+
 // Fixed LBAs, part of the host interface (see README). 0x2001-0x20FF is
 // reserved for .B2F, other files start at B2F_AREA_END_LBA.
 #define B2F_DIR_LBA      0x2001
@@ -46,16 +57,24 @@
 #define B2F_STATUS_SIZE  SECTOR_SIZE
 #define B2F_FRAME_LBA    (B2F_STATUS_LBA + B2F_STATUS_SIZE / SECTOR_SIZE)
 #define B2F_FRAME_SIZE   (128 * 64 / 8)
+#define B2F_MODE_LBA     (B2F_FRAME_LBA + B2F_FRAME_SIZE / SECTOR_SIZE)
+#define B2F_MODE_SIZE    SECTOR_SIZE
+#define B2F_BIN_LBA      0x2020
 #define B2F_AREA_END_LBA 0x2100
 
 // Clusters are 1 sector, so every LBA in the data area is a cluster
 _Static_assert(SECTORS_PER_CLUSTER == 1, ".B2F LBAs need 1 sector clusters");
 _Static_assert(B2F_DIR_LBA == DATA_START_LBA + 1, ".B2F must follow the root directory");
 _Static_assert(
-    B2F_FRAME_LBA + B2F_FRAME_SIZE / SECTOR_SIZE <= B2F_AREA_END_LBA,
-    ".B2F files don't fit the reserved area");
+    B2F_MODE_LBA + B2F_MODE_SIZE / SECTOR_SIZE <= B2F_BIN_LBA,
+    ".B2F files run into .B2F/bin");
 
 typedef struct B2fDir B2fDir;
+
+typedef enum {
+    B2fModeStatus,
+    B2fModeFramebuffer,
+} B2fMode;
 
 /**
  * Callback function type for .B2F changes, called from the USB thread
@@ -85,9 +104,13 @@ void b2f_dir_set_update_callback(B2fDir* b2f, B2fDirUpdateCallback callback, voi
 size_t b2f_dir_get_status(B2fDir* b2f, char* text, size_t size);
 
 /**
+ * What the host asked the Flipper to show
+ */
+B2fMode b2f_dir_get_mode(B2fDir* b2f);
+
+/**
  * Lock the frame against host writes while drawing it
- * @return Frame (B2F_FRAME_SIZE bytes), or NULL if the host didn't write one.
- *         Call b2f_dir_release_frame either way.
+ * @return Frame (B2F_FRAME_SIZE bytes), release it with b2f_dir_release_frame
  */
 const uint8_t* b2f_dir_acquire_frame(B2fDir* b2f);
 

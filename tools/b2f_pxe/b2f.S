@@ -6,6 +6,7 @@
  *
  *   imgexec <INITRD> status Booting kernel...\nPlease wait
  *   imgexec <INITRD> frame http://server/logo.bin
+ *   imgexec <INITRD> mode framebuffer
  *   imgexec <INITRD> clear
  *
  * The arguments come from iPXE's PXENV_FILE_CMDLINE, the frame is read with
@@ -94,6 +95,16 @@ fail:
 
 /* Handlers: %si = argument, return %ax = exit code */
 cmd_status:
+	movl	status_lba, %eax
+	jmp	write_text
+
+cmd_mode:
+	movl	mode_lba, %eax
+	jmp	write_text
+
+/* Write the text at %si to the 1 sector file at %eax, "\n" starts a new line */
+write_text:
+	pushl	%eax
 	movw	$sector, %di
 	call	zero_sector
 	movw	$sector, %di
@@ -109,7 +120,7 @@ cmd_status:
 	movb	$'\n', %al
 2:	stosb
 	loop	1b
-3:	movl	status_lba, %eax
+3:	popl	%eax
 	movw	$1, %cx
 	movw	$sector, %bx
 	jmp	write_sectors
@@ -125,8 +136,14 @@ cmd_clear:
 	call	write_sectors
 	testw	%ax, %ax
 	jnz	1f
-	movw	$cmdline + 255, %si	/* empty string */
-	jmp	cmd_status
+	movw	$empty, %si
+	movl	status_lba, %eax
+	call	write_text
+	testw	%ax, %ax
+	jnz	1f
+	movw	$name_status, %si	/* back to status mode */
+	movl	mode_lba, %eax
+	call	write_text
 1:	ret
 
 cmd_frame:
@@ -262,6 +279,7 @@ find_disk:
 parse_info:
 	movl	$0, status_lba
 	movl	$0, frame_lba
+	movl	$0, mode_lba
 	movw	sector + 10, %cx	/* entry count */
 	movw	$sector + 16, %bx
 1:	jcxz	3f
@@ -279,12 +297,20 @@ parse_info:
 	jne	2f
 	movl	16(%bx), %eax
 	movl	%eax, frame_lba
+2:	movw	%bx, %si
+	movw	$name_mode, %di
+	call	name_equal
+	jne	2f
+	movl	16(%bx), %eax
+	movl	%eax, mode_lba
 2:	addw	$32, %bx
 	decw	%cx
 	jmp	1b
 3:	cmpl	$0, status_lba
 	je	4f
 	cmpl	$0, frame_lba
+	je	4f
+	cmpl	$0, mode_lba
 	je	4f
 	clc
 	ret
@@ -387,6 +413,7 @@ putc:
 commands:
 	.word	name_status, cmd_status
 	.word	name_frame, cmd_frame
+	.word	name_mode, cmd_mode
 	.word	name_clear, cmd_clear
 	.word	0
 
@@ -396,10 +423,14 @@ name_status:
 	.asciz	"status"
 name_frame:
 	.asciz	"frame"
+name_mode:
+	.asciz	"mode"
 name_clear:
 	.asciz	"clear"
+empty:
+	.byte	0
 msg_usage:
-	.asciz	"usage: b2f.pxe status <text> | frame <uri> | clear\n"
+	.asciz	"usage: b2f.pxe status <text> | frame <uri> | mode <mode> | clear\n"
 msg_no_disk:
 	.asciz	"b2f: Flipper disk not found\n"
 msg_open:
@@ -420,6 +451,8 @@ drive:
 status_lba:
 	.long	0
 frame_lba:
+	.long	0
+mode_lba:
 	.long	0
 
 dap:

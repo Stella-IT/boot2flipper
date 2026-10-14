@@ -58,12 +58,11 @@ static void usb_mass_storage_draw_callback(Canvas* canvas, void* model) {
         break;
 
     case UsbMassStorageStateActive: {
-        // A frame from the host takes the whole screen
-        if(instance->b2f) {
-            const uint8_t* frame = b2f_dir_acquire_frame(instance->b2f);
-            if(frame) canvas_draw_xbm(canvas, 0, 0, 128, 64, frame);
+        // The host's frame takes the whole screen in framebuffer mode
+        if(instance->b2f && b2f_dir_get_mode(instance->b2f) == B2fModeFramebuffer) {
+            canvas_draw_xbm(canvas, 0, 0, 128, 64, b2f_dir_acquire_frame(instance->b2f));
             b2f_dir_release_frame(instance->b2f);
-            if(frame) break;
+            break;
         }
 
         canvas_draw_str(canvas, 10, 12, "Boot2Flipper Ready");

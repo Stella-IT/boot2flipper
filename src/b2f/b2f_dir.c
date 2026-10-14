@@ -9,8 +9,6 @@ typedef struct {
     B2fDir* b2f;
     uint8_t* host; // Buffer of the virtual FAT file, written by the USB thread
     uint8_t* shown; // Copy read by the GUI, under b2f->mutex
-    size_t size;
-    bool* written;
 } B2fFile;
 
 struct B2fDir {
@@ -23,12 +21,21 @@ struct B2fDir {
     uint8_t status_shown[B2F_STATUS_SIZE];
     uint8_t frame_host[B2F_FRAME_SIZE];
     uint8_t frame_shown[B2F_FRAME_SIZE];
-    bool status_written;
-    bool frame_written;
+    uint8_t mode_host[B2F_MODE_SIZE];
+    uint8_t mode_shown[B2F_MODE_SIZE];
+    B2fMode mode;
 
     B2fFile status_file;
     B2fFile frame_file;
+    B2fFile mode_file;
 };
+
+// Writers for iPXE, from .B2F/bin up to the end of the area
+_Static_assert(
+    (sizeof(b2f_efi_image) + SECTOR_SIZE - 1) / SECTOR_SIZE +
+            (sizeof(b2f_pxe_image) + SECTOR_SIZE - 1) / SECTOR_SIZE <
+        B2F_AREA_END_LBA - B2F_BIN_LBA,
+    ".B2F/bin doesn't fit the reserved area");
 
 static void put_u16(uint8_t* p, uint16_t value) {
     p[0] = value & 0xFF;
@@ -60,16 +67,17 @@ B2fDir* b2f_dir_alloc(void) {
     memset(b2f, 0, sizeof(B2fDir));
     b2f->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
 
-    b2f->status_file =
-        (B2fFile){b2f, b2f->status_host, b2f->status_shown, B2F_STATUS_SIZE, &b2f->status_written};
-    b2f->frame_file =
-        (B2fFile){b2f, b2f->frame_host, b2f->frame_shown, B2F_FRAME_SIZE, &b2f->frame_written};
+    b2f->status_file = (B2fFile){b2f, b2f->status_host, b2f->status_shown};
+    b2f->frame_file = (B2fFile){b2f, b2f->frame_host, b2f->frame_shown};
+    b2f->mode_file = (B2fFile){b2f, b2f->mode_host, b2f->mode_shown};
+    b2f->mode = B2fModeStatus;
 
     memcpy(b2f->info, B2F_MAGIC, 8);
     put_u16(b2f->info + 8, B2F_INFO_VERSION);
     b2f_dir_add_info_entry(
         b2f->info, "status", B2F_STATUS_LBA, B2F_STATUS_SIZE, B2F_INFO_WRITABLE);
     b2f_dir_add_info_entry(b2f->info, "frame", B2F_FRAME_LBA, B2F_FRAME_SIZE, B2F_INFO_WRITABLE);
+    b2f_dir_add_info_entry(b2f->info, "mode", B2F_MODE_LBA, B2F_MODE_SIZE, B2F_INFO_WRITABLE);
     return b2f;
 }
 
@@ -79,6 +87,18 @@ void b2f_dir_free(B2fDir* b2f) {
     free(b2f);
 }
 
+// The word in .B2F/mode, up to the first NUL, space or newline
+static B2fMode b2f_dir_parse_mode(const uint8_t* text) {
+    size_t length = 0;
+    while(length < B2F_MODE_SIZE && text[length] > ' ')
+        length++;
+
+    if(length == strlen(B2F_MODE_FRAMEBUFFER) && memcmp(text, B2F_MODE_FRAMEBUFFER, length) == 0) {
+        return B2fModeFramebuffer;
+    }
+    return B2fModeStatus;
+}
+
 // The virtual FAT wrote to the host buffer, show it
 static void b2f_dir_file_written(void* context, uint32_t offset, uint32_t size) {
     B2fFile* file = context;
@@ -86,16 +106,7 @@ static void b2f_dir_file_written(void* context, uint32_t offset, uint32_t size) 
 
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
     memcpy(file->shown + offset, file->host + offset, size);
-
-    // An all-zero file counts as not written, so clearing the frame brings the
-    // Flipper's own screen back
-    *file->written = false;
-    for(size_t i = 0; i < file->size; i++) {
-        if(file->shown[i] != 0) {
-            *file->written = true;
-            break;
-        }
-    }
+    if(file == &b2f->mode_file) b2f->mode = b2f_dir_parse_mode(b2f->mode_shown);
     furi_mutex_release(b2f->mutex);
 
     if(b2f->callback) b2f->callback(b2f->callback_context);
@@ -132,12 +143,26 @@ bool b2f_dir_add_to(B2fDir* b2f, VirtualFat* vfat) {
            b2f->frame_host,
            B2F_FRAME_SIZE,
            b2f_dir_file_written,
-           &b2f->frame_file)) {
+           &b2f->frame_file) ||
+       !virtual_fat_add_fixed_file(
+           vfat,
+           B2F_DIR_PATH,
+           "mode",
+           LBA_TO_CLUSTER(B2F_MODE_LBA),
+           b2f->mode_host,
+           B2F_MODE_SIZE,
+           b2f_dir_file_written,
+           &b2f->mode_file)) {
         B2F_LOG_E(TAG, "Failed to add " B2F_DIR_PATH);
         return false;
     }
 
-    // Writers for iPXE, also in the reserved area
+    // Writers for iPXE, from .B2F/bin, so more fixed files fit before it
+    if(!virtual_fat_add_fixed_directory(vfat, B2F_BIN_PATH, LBA_TO_CLUSTER(B2F_BIN_LBA), 0)) {
+        B2F_LOG_E(TAG, "Failed to add " B2F_BIN_PATH);
+        return false;
+    }
+    virtual_fat_set_allocation_start(vfat, LBA_TO_CLUSTER(B2F_BIN_LBA) + 1);
     if(!virtual_fat_add_static_file(
            vfat, B2F_BIN_PATH, "b2f.efi", b2f_efi_image, sizeof(b2f_efi_image)) ||
        !virtual_fat_add_static_file(
@@ -177,9 +202,16 @@ size_t b2f_dir_get_status(B2fDir* b2f, char* text, size_t size) {
     return length;
 }
 
+B2fMode b2f_dir_get_mode(B2fDir* b2f) {
+    furi_mutex_acquire(b2f->mutex, FuriWaitForever);
+    B2fMode mode = b2f->mode;
+    furi_mutex_release(b2f->mutex);
+    return mode;
+}
+
 const uint8_t* b2f_dir_acquire_frame(B2fDir* b2f) {
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
-    return b2f->frame_written ? b2f->frame_shown : NULL;
+    return b2f->frame_shown;
 }
 
 void b2f_dir_release_frame(B2fDir* b2f) {

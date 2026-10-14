@@ -2,13 +2,15 @@
 //
 //   chain file:/.B2F/bin/b2f.efi status Booting kernel...\nPlease wait
 //   chain file:/.B2F/bin/b2f.efi frame logo.bin
+//   chain file:/.B2F/bin/b2f.efi mode framebuffer
 //   chain file:/.B2F/bin/b2f.efi clear
 //
-// status  Text shown on the Flipper, "\n" starts a new line
-// frame   Shows a 1024 byte 128x64 frame (see README). The file is opened on
+// status  Text shown in status mode, "\n" starts a new line
+// frame   Writes a 1024 byte 128x64 frame (see README). The file is opened on
 //         the device b2f.efi was loaded from, which under iPXE holds the images
 //         it fetched, e.g. "imgfetch http://server/logo.bin logo.bin"
-// clear   Clears the status and frame, the Flipper shows its own screen again
+// mode    What the Flipper shows: "status" or "framebuffer"
+// clear   Clears the status and frame and goes back to status mode
 //
 // The Flipper is found by the "B2F INFO" header at B2F_INFO_LBA on each disk,
 // and the file LBAs are read from it. Freestanding, no EFI library needed: see
@@ -177,13 +179,21 @@ static void print(const char* text) {
     }
 }
 
+static int str_equal(const char* a, const char* b) {
+    while(*a && *a == *b) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
 static uint32_t get_u32(const uint8_t* p) {
     return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
 typedef struct {
     EFI_BLOCK_IO* block_io;
-    uint32_t status_lba, frame_lba;
+    uint32_t status_lba, frame_lba, mode_lba;
 } B2fDisk;
 
 // Read the .B2F info header, true if the disk is a Flipper
@@ -202,21 +212,16 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
     }
 
     disk->block_io = block_io;
-    disk->status_lba = disk->frame_lba = 0;
+    disk->status_lba = disk->frame_lba = disk->mode_lba = 0;
     uint16_t count = sector[10] | sector[11] << 8;
     for(uint16_t i = 0; i < count && 16 + (i + 1) * 32 <= B2F_SECTOR_SIZE; i++) {
         const uint8_t* entry = sector + 16 + i * 32;
         const char* name = (const char*)entry;
-        if(name[0] == 's' && name[1] == 't' && name[2] == 'a' && name[3] == 't' &&
-           name[4] == 'u' && name[5] == 's' && name[6] == '\0') {
-            disk->status_lba = get_u32(entry + 16);
-        } else if(
-            name[0] == 'f' && name[1] == 'r' && name[2] == 'a' && name[3] == 'm' &&
-            name[4] == 'e' && name[5] == '\0') {
-            disk->frame_lba = get_u32(entry + 16);
-        }
+        if(str_equal(name, "status")) disk->status_lba = get_u32(entry + 16);
+        if(str_equal(name, "frame")) disk->frame_lba = get_u32(entry + 16);
+        if(str_equal(name, "mode")) disk->mode_lba = get_u32(entry + 16);
     }
-    return disk->status_lba != 0 && disk->frame_lba != 0;
+    return disk->status_lba != 0 && disk->frame_lba != 0 && disk->mode_lba != 0;
 }
 
 static int b2f_disk_find(B2fDisk* disk) {
@@ -267,7 +272,8 @@ static int word_is(const char* p, const char* word) {
     return *word == '\0' && (*p == '\0' || *p == ' ');
 }
 
-static EFI_STATUS b2f_status(B2fDisk* disk, const char* text) {
+// Write text to a 1 sector file, "\n" starts a new line
+static EFI_STATUS b2f_text(B2fDisk* disk, uint32_t lba, const char* text) {
     memset(sector, 0, sizeof(sector));
     size_t length = 0;
     while(*text && length < B2F_SECTOR_SIZE - 1) {
@@ -278,7 +284,7 @@ static EFI_STATUS b2f_status(B2fDisk* disk, const char* text) {
             sector[length++] = (uint8_t)*text++;
         }
     }
-    return b2f_disk_write(disk, disk->status_lba, sector, B2F_SECTOR_SIZE);
+    return b2f_disk_write(disk, lba, sector, B2F_SECTOR_SIZE);
 }
 
 static EFI_STATUS b2f_frame(B2fDisk* disk, EFI_HANDLE device, const char* name) {
@@ -334,8 +340,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     cmdline[length] = '\0';
     const char* args = skip_word(cmdline);
 
-    if(!word_is(args, "status") && !word_is(args, "frame") && !word_is(args, "clear")) {
-        print("usage: b2f.efi status <text> | frame <file> | clear\n");
+    if(!word_is(args, "status") && !word_is(args, "frame") && !word_is(args, "mode") &&
+       !word_is(args, "clear")) {
+        print("usage: b2f.efi status <text> | frame <file> | mode <mode> | clear\n");
         return EFI_INVALID_PARAMETER;
     }
 
@@ -345,7 +352,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
         return EFI_NOT_FOUND;
     }
 
-    if(word_is(args, "status")) return b2f_status(&disk, skip_word(args));
+    if(word_is(args, "status")) return b2f_text(&disk, disk.status_lba, skip_word(args));
+    if(word_is(args, "mode")) return b2f_text(&disk, disk.mode_lba, skip_word(args));
     if(word_is(args, "frame")) {
         return b2f_frame(&disk, loaded_image->device_handle, skip_word(args));
     }
@@ -353,5 +361,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     // clear
     memset(frame, 0, sizeof(frame));
     EFI_STATUS status = b2f_disk_write(&disk, disk.frame_lba, frame, B2F_FRAME_SIZE);
-    return EFI_ERROR(status) ? status : b2f_status(&disk, "");
+    if(!EFI_ERROR(status)) status = b2f_text(&disk, disk.status_lba, "");
+    if(!EFI_ERROR(status)) status = b2f_text(&disk, disk.mode_lba, "status");
+    return status;
 }
