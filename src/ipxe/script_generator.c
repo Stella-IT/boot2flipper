@@ -1,13 +1,32 @@
 #include "script_generator.h"
 #include <string.h>
+#include "../b2f/b2f_dir.h"
 #include "../log.h"
 
 #define TAG "iPXEScript"
 
+// Sets ${b2f} to the .B2F writer: b2f.efi from the disk on UEFI, the BIOS
+// loader's initrd (b2f.pxe) on BIOS. Without a writer it names a missing file,
+// so imgexec fails: left empty, imgexec would run the current script again.
+static void append_b2f_setup(FuriString* script, bool bios_writer) {
+    furi_string_cat_printf(
+        script, "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | clear\n");
+    furi_string_cat_printf(script, "set b2f file:/%s/unavailable\n", B2F_BIN_PATH);
+    furi_string_cat_printf(
+        script,
+        "iseq ${platform} efi && imgfetch --name b2f file:/%s && set b2f b2f || echo -n\n",
+        B2F_EFI_PATH);
+    if(bios_writer) {
+        furi_string_cat_printf(script, "iseq ${platform} pcbios && set b2f <INITRD> || echo -n\n");
+    }
+    furi_string_cat_printf(script, "\n");
+}
+
 FuriString* ipxe_script_generate_dhcp(
     const char* chainload_url,
     const char* network_interface,
-    bool chainload_enabled) {
+    bool chainload_enabled,
+    bool bios_writer) {
     FuriString* script = furi_string_alloc();
 
     // Determine interface - if blank/NULL, use auto-detect (no interface specified)
@@ -24,6 +43,7 @@ FuriString* ipxe_script_generate_dhcp(
     furi_string_cat_printf(script, "#!ipxe\n");
     furi_string_cat_printf(script, "# Boot2Flipper - DHCP Mode\n");
     furi_string_cat_printf(script, "\n");
+    append_b2f_setup(script, bios_writer);
     furi_string_cat_printf(script, "echo Boot2Flipper: Configuring network (DHCP)\n");
 
     // Use "dhcp" for auto-detect, "dhcp <interface>" for specific interface
@@ -85,7 +105,8 @@ FuriString* ipxe_script_generate_static(
     const char* dns,
     const char* chainload_url,
     const char* network_interface,
-    bool chainload_enabled) {
+    bool chainload_enabled,
+    bool bios_writer) {
     FuriString* script = furi_string_alloc();
 
     // Use default if network_interface is NULL
@@ -104,6 +125,7 @@ FuriString* ipxe_script_generate_static(
     furi_string_cat_printf(script, "#!ipxe\n");
     furi_string_cat_printf(script, "# Boot2Flipper - Static IP Mode\n");
     furi_string_cat_printf(script, "\n");
+    append_b2f_setup(script, bios_writer);
     furi_string_cat_printf(script, "echo Boot2Flipper: Configuring network (Static IP)\n");
     furi_string_cat_printf(script, "\n");
     furi_string_cat_printf(script, "# Configure static IP\n");

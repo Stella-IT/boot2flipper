@@ -5,6 +5,7 @@
 #include <gui/view_dispatcher.h>
 #include <gui/modules/widget.h>
 #include "../../disk/virtual_fat.h"
+#include "../../b2f/b2f_dir.h"
 #include "../../usb/usb_scsi.h"
 #include "../../usb/usb_msc.h"
 
@@ -38,6 +39,7 @@ typedef struct {
     FuriString* status_text;
     FuriString* current_file;
     VirtualFat* vfat;
+    B2fDir* b2f;
     UsbScsiContext* scsi;
     UsbMscContext* msc;
 } AppUsbMassStorage;

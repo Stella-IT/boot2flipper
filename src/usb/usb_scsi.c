@@ -28,6 +28,7 @@ struct UsbScsiContext {
     uint32_t read_start_lba; // For READ_10 throughput logging
     uint32_t read_start_tick;
     uint32_t remaining_blocks;
+    bool write_failed; // A WRITE_10 sector was refused, reported once all data arrived
     uint8_t block_buffer[SCSI_BLOCK_SIZE];
     size_t buffer_offset;
 };
@@ -249,6 +250,38 @@ static bool scsi_cmd_read_10(UsbScsiContext* ctx, uint8_t* cmd) {
     return true;
 }
 
+static bool scsi_cmd_write_10(UsbScsiContext* ctx, uint8_t* cmd) {
+    if(!ctx->vfat) {
+        scsi_set_sense(ctx, SCSI_SENSE_NOT_READY, SCSI_ASC_MEDIUM_NOT_PRESENT);
+        return false;
+    }
+
+    uint32_t lba = ((uint32_t)cmd[2] << 24) | ((uint32_t)cmd[3] << 16) | ((uint32_t)cmd[4] << 8) |
+                   cmd[5];
+    uint16_t length = ((uint16_t)cmd[7] << 8) | cmd[8];
+    B2F_LOG_D(TAG, "SCSI: WRITE_10 LBA=%lu, Length=%u", lba, length);
+
+    uint32_t total_blocks = virtual_fat_get_total_sectors(ctx->vfat);
+    if(lba + length > total_blocks) {
+        B2F_LOG_E(TAG, "WRITE_10: LBA out of range");
+        scsi_set_sense(ctx, SCSI_SENSE_ILLEGAL_REQUEST, SCSI_ASC_LBA_OUT_OF_RANGE);
+        return false;
+    }
+
+    ctx->current_lba = lba;
+    ctx->remaining_blocks = length;
+    ctx->buffer_offset = 0;
+    ctx->write_failed = false;
+    ctx->state = length > 0 ? SCSI_STATE_RX_DATA : SCSI_STATE_IDLE;
+
+    return true;
+}
+
+// Device specific parameter of MODE SENSE, bit 7 = write protected
+static uint8_t scsi_device_specific_parameter(UsbScsiContext* ctx) {
+    return virtual_fat_is_write_protected(ctx->vfat) ? 0x80 : 0x00;
+}
+
 static bool scsi_cmd_mode_sense_6(UsbScsiContext* ctx) {
     B2F_LOG_D(TAG, "SCSI: MODE_SENSE_6");
 
@@ -256,7 +289,7 @@ static bool scsi_cmd_mode_sense_6(UsbScsiContext* ctx) {
     uint8_t mode_sense_data[4] = {
         0x03, // Mode data length
         0x00, // Medium type
-        0x80, // Device specific parameter (bit 7 = write protected)
+        scsi_device_specific_parameter(ctx),
         0x00 // Block descriptor length
     };
 
@@ -277,7 +310,7 @@ static bool scsi_cmd_mode_sense_10(UsbScsiContext* ctx) {
         0x00,
         0x06, // Mode data length (big-endian) - 6 additional bytes
         0x00, // Medium type
-        0x80, // Device specific parameter (bit 7 = write protected)
+        scsi_device_specific_parameter(ctx),
         0x00,
         0x00, // Reserved
         0x00,
@@ -394,10 +427,12 @@ bool usb_scsi_process_command(UsbScsiContext* ctx, uint8_t* cmd, uint8_t cmd_len
     }
 
     case SCSI_CMD_WRITE_10:
-        // Read-only filesystem
-        B2F_LOG_W(TAG, "SCSI: WRITE_10 not supported (read-only)");
-        scsi_set_sense(ctx, SCSI_SENSE_DATA_PROTECT, 0x27); // Write protected
-        return false;
+        // The virtual FAT's write mode decides what is kept
+        return scsi_cmd_write_10(ctx, cmd);
+
+    case SCSI_CMD_SYNCHRONIZE_CACHE_10:
+        B2F_LOG_D(TAG, "SCSI: SYNCHRONIZE_CACHE_10 (no cache)");
+        return true;
 
     default:
         B2F_LOG_W(TAG, "SCSI: Unknown command 0x%02X", opcode);
@@ -501,11 +536,48 @@ size_t usb_scsi_transmit_data(UsbScsiContext* ctx, uint8_t* buffer, size_t max_l
 }
 
 bool usb_scsi_receive_data(UsbScsiContext* ctx, uint8_t* buffer, size_t len) {
-    UNUSED(ctx);
-    UNUSED(buffer);
-    UNUSED(len);
-    // Read-only filesystem, no WRITE support
-    return false;
+    if(ctx == NULL || buffer == NULL) return false;
+    if(ctx->state != SCSI_STATE_RX_DATA) {
+        B2F_LOG_D(TAG, "RX: not in RX_DATA state (state=%d)", ctx->state);
+        return false;
+    }
+
+    // Packets fill block_buffer, each full sector goes to the virtual FAT
+    while(len > 0 && ctx->remaining_blocks > 0) {
+        size_t chunk = SCSI_BLOCK_SIZE - ctx->buffer_offset;
+        if(chunk > len) chunk = len;
+        memcpy(ctx->block_buffer + ctx->buffer_offset, buffer, chunk);
+        ctx->buffer_offset += chunk;
+        buffer += chunk;
+        len -= chunk;
+
+        if(ctx->buffer_offset == SCSI_BLOCK_SIZE) {
+            // Keep taking the data of a refused sector, the host sends it anyway
+            if(!virtual_fat_write_sector(
+                   ctx->storage, ctx->vfat, ctx->current_lba, ctx->block_buffer) &&
+               !ctx->write_failed) {
+                B2F_LOG_W(TAG, "Write refused at LBA %lu", ctx->current_lba);
+                ctx->write_failed = true;
+            }
+            ctx->current_lba++;
+            ctx->remaining_blocks--;
+            ctx->buffer_offset = 0;
+        }
+    }
+
+    if(ctx->remaining_blocks > 0) return true;
+
+    // All data arrived, fail the command if a sector was refused
+    ctx->state = SCSI_STATE_IDLE;
+    if(ctx->write_failed) {
+        if(virtual_fat_is_write_protected(ctx->vfat)) {
+            scsi_set_sense(ctx, SCSI_SENSE_DATA_PROTECT, SCSI_ASC_WRITE_PROTECTED);
+        } else {
+            scsi_set_sense(ctx, SCSI_SENSE_MEDIUM_ERROR, SCSI_ASC_WRITE_ERROR);
+        }
+        return false;
+    }
+    return true;
 }
 
 bool usb_scsi_has_tx_data(UsbScsiContext* ctx) {

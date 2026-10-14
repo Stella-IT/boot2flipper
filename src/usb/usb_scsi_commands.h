@@ -15,6 +15,7 @@
 #define SCSI_CMD_READ_CAPACITY_10             0x25
 #define SCSI_CMD_READ_10                      0x28
 #define SCSI_CMD_WRITE_10                     0x2A
+#define SCSI_CMD_SYNCHRONIZE_CACHE_10         0x35
 #define SCSI_CMD_MODE_SENSE_10                0x5A
 
 /**
@@ -36,9 +37,11 @@
 /**
  * SCSI Additional Sense Codes
  */
+#define SCSI_ASC_WRITE_ERROR          0x0C
 #define SCSI_ASC_INVALID_COMMAND      0x20
 #define SCSI_ASC_LBA_OUT_OF_RANGE     0x21
 #define SCSI_ASC_INVALID_FIELD_IN_CDB 0x24
+#define SCSI_ASC_WRITE_PROTECTED      0x27
 #define SCSI_ASC_MEDIUM_NOT_PRESENT   0x3A
 
 /**

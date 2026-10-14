@@ -12,12 +12,15 @@
  * @param chainload_url URL to chainload after network setup
  * @param network_interface Network interface name (e.g., "net0", "net1")
  * @param chainload_enabled Enable chainloading (if false, drops to shell after network setup)
+ * @param bios_writer The BIOS loader passes the .B2F writer as initrd (the script is
+ *        passed as command line), so ${b2f} can use it on BIOS
  * @return Generated script as FuriString (caller must free)
  */
 FuriString* ipxe_script_generate_dhcp(
     const char* chainload_url,
     const char* network_interface,
-    bool chainload_enabled);
+    bool chainload_enabled,
+    bool bios_writer);
 
 /**
  * Generate iPXE script for static IP mode
@@ -28,6 +31,7 @@ FuriString* ipxe_script_generate_dhcp(
  * @param chainload_url URL to chainload after network setup
  * @param network_interface Network interface name (e.g., "net0", "net1")
  * @param chainload_enabled Enable chainloading (if false, drops to shell after network setup)
+ * @param bios_writer See ipxe_script_generate_dhcp
  * @return Generated script as FuriString (caller must free)
  */
 FuriString* ipxe_script_generate_static(
@@ -37,7 +41,8 @@ FuriString* ipxe_script_generate_static(
     const char* dns,
     const char* chainload_url,
     const char* network_interface,
-    bool chainload_enabled);
+    bool chainload_enabled,
+    bool bios_writer);
 
 /**
  * Get script size (useful for disk image calculation)

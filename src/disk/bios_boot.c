@@ -32,4 +32,6 @@ void bios_boot_read_stage2_sector(uint32_t lba, const BiosBootParams* params, ui
     put_le32(&buffer[BIOS_BOOT_KERNEL_SIZE_OFFSET - STAGE2_OFFSET], params->kernel_size);
     put_le32(&buffer[BIOS_BOOT_INITRD_LBA_OFFSET - STAGE2_OFFSET], params->initrd_lba);
     put_le32(&buffer[BIOS_BOOT_INITRD_SIZE_OFFSET - STAGE2_OFFSET], params->initrd_size);
+    put_le32(&buffer[BIOS_BOOT_CMDLINE_LBA_OFFSET - STAGE2_OFFSET], params->cmdline_lba);
+    put_le32(&buffer[BIOS_BOOT_CMDLINE_SIZE_OFFSET - STAGE2_OFFSET], params->cmdline_size);
 }

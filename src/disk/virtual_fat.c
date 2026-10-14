@@ -11,6 +11,8 @@
 #define MAX_FILES     16
 #define SD_CACHE_SIZE 4096 // SD read-ahead size, multiple of SECTOR_SIZE
 
+#define FAT_ENTRY_BAD 0x0FFFFFF7
+
 // VFAT Long Filename (LFN) support
 #define LFN_ATTR 0x0F // LFN attribute (read-only + system + hidden + volume)
 #define LFN_LAST 0x40 // Last LFN entry flag
@@ -18,14 +20,28 @@
 // Hosts pick the FAT type from the cluster count, so it must stay FAT32
 _Static_assert(DATA_CLUSTERS(PARTITION_SECTORS_MBR) >= 65525, "MBR partition too small for FAT32");
 _Static_assert(DATA_CLUSTERS(PARTITION_SECTORS_GPT) >= 65525, "GPT partition too small for FAT32");
+_Static_assert(sizeof(BPB_VOLUME_LABEL) == 12, "Boot sector label must be 11 characters");
+_Static_assert(sizeof(VOLUME_LABEL) == 12, "Volume label must be 11 characters");
+// Boot sector, FSInfo and their backups (sector 6, 7) are reserved sectors, and
+// the count is a 16-bit BPB field
+_Static_assert(RESERVED_SECTORS >= 32 && RESERVED_SECTORS <= 0xFFFF, "Bad reserved sector count");
+// Fixed files must sit at the same LBA in every scheme (see RESERVED_SECTORS)
+_Static_assert(
+    FAT_SIZE_SECTORS(PARTITION_SECTORS_MBR) == FAT_SIZE_SECTORS(PARTITION_SECTORS_GPT),
+    "FAT size differs between schemes");
 
 struct VirtualFat {
     VirtualFatFile files[MAX_FILES];
     uint8_t file_count;
     uint32_t next_cluster;
+    uint32_t used_clusters; // Clusters taken by files and directories (root excluded)
+    uint32_t held_start; // Clusters of a fixed file being added, skipped by allocations
+    uint32_t held_end;
     PartitionScheme partition_scheme;
+    WriteMode write_mode;
     int8_t bios_kernel_index; // File loaded by the BIOS boot loader, -1 if unset
     int8_t bios_initrd_index;
+    int8_t bios_cmdline_index;
 
     // SD read-ahead: one open file and one cache shared by all SD-backed files,
     // so memory stays fixed no matter how many files are added
@@ -35,6 +51,11 @@ struct VirtualFat {
     uint8_t* sd_cache; // SD_CACHE_SIZE bytes, allocated on first use
     int8_t sd_cache_index; // File held in sd_cache, -1 if empty
     uint32_t sd_cache_offset; // File offset of sd_cache[0]
+
+    // WRITE_MODE_MEMORY: sectors written by the host
+    uint8_t* write_cache; // WRITE_CACHE_SECTORS sectors, allocated with the mode
+    uint32_t write_cache_lba[WRITE_CACHE_SECTORS];
+    uint8_t write_cache_count;
 
     VirtualFatFileReadCallback read_callback;
     void* callback_context;
@@ -46,13 +67,85 @@ VirtualFat* virtual_fat_alloc(void) {
 
     vfat->file_count = 0;
     vfat->partition_scheme = PARTITION_SCHEME_HYBRID; // Default: BIOS and UEFI
+    vfat->write_mode = WRITE_MODE_BAD; // Default: hosts can't add files
     vfat->next_cluster = 3; // Cluster 2 is root directory, files start at cluster 3
     vfat->bios_kernel_index = -1;
     vfat->bios_initrd_index = -1;
+    vfat->bios_cmdline_index = -1;
     vfat->sd_file_index = -1;
     vfat->sd_cache_index = -1;
 
     return vfat;
+}
+
+static uint32_t clusters_for_size(uint32_t size) {
+    return (size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) / (SECTORS_PER_CLUSTER * SECTOR_SIZE);
+}
+
+static uint32_t file_clusters(const VirtualFatFile* file) {
+    return file->is_directory ? 1 : clusters_for_size(file->size); // Directories take 1 cluster
+}
+
+// Take count contiguous clusters, skipping the ones of fixed files
+static uint32_t allocate_clusters(VirtualFat* vfat, uint32_t count) {
+    uint32_t start = vfat->next_cluster;
+    bool moved = true;
+    while(moved && count > 0) {
+        moved = false;
+        if(start < vfat->held_end && vfat->held_start < start + count) {
+            start = vfat->held_end;
+            moved = true;
+        }
+        for(uint8_t i = 0; i < vfat->file_count; i++) {
+            VirtualFatFile* file = &vfat->files[i];
+            uint32_t end = file->start_cluster + file_clusters(file);
+            if(file->fixed && start < end && file->start_cluster < start + count) {
+                start = end;
+                moved = true;
+            }
+        }
+    }
+    if(start + count > vfat->next_cluster) vfat->next_cluster = start + count;
+    vfat->used_clusters += count;
+    return start;
+}
+
+// 8.3 name for a long name. A name starting with dots (e.g. ".config") can't be a
+// short name, so the dots are dropped and "~1" marks it, like Windows does.
+static void make_short_name(char* short_name, const char* name, bool split_extension) {
+    memset(short_name, ' ', 11);
+
+    bool lossy = false;
+    while(*name == '.') {
+        name++;
+        lossy = true;
+    }
+
+    const char* dot = split_extension ? strrchr(name, '.') : NULL; // Use last dot
+    size_t name_len = dot ? (size_t)(dot - name) : strlen(name);
+    size_t max_len = lossy ? 6 : 8;
+    if(name_len > max_len) name_len = max_len;
+
+    // Convert name to uppercase
+    for(size_t i = 0; i < name_len; i++) {
+        short_name[i] = toupper((unsigned char)name[i]);
+    }
+    if(lossy) memcpy(&short_name[name_len], "~1", 2);
+
+    if(dot && strlen(dot + 1) > 0) {
+        size_t ext_len = strlen(dot + 1);
+        if(ext_len > 3) ext_len = 3;
+        // Convert extension to uppercase
+        for(size_t i = 0; i < ext_len; i++) {
+            short_name[8 + i] = toupper((unsigned char)dot[1 + i]);
+        }
+    }
+}
+
+static void set_long_name(VirtualFatFile* file, const char* name, size_t length) {
+    if(length >= sizeof(file->long_name)) length = sizeof(file->long_name) - 1;
+    memcpy(file->long_name, name, length);
+    file->long_name[length] = '\0';
 }
 
 static void sd_file_close(VirtualFat* vfat) {
@@ -69,10 +162,11 @@ void virtual_fat_free(VirtualFat* vfat) {
 
     sd_file_close(vfat);
     free(vfat->sd_cache);
+    free(vfat->write_cache);
 
     // Free file data
     for(uint8_t i = 0; i < vfat->file_count; i++) {
-        if(vfat->files[i].source_type == FILE_SOURCE_MEMORY &&
+        if(vfat->files[i].source_type == FILE_SOURCE_MEMORY && !vfat->files[i].static_data &&
            vfat->files[i].memory_data != NULL) {
             free((void*)vfat->files[i].memory_data);
         } else if(vfat->files[i].source_type == FILE_SOURCE_SD_CARD && vfat->files[i].sd_path != NULL) {
@@ -94,33 +188,8 @@ bool virtual_fat_add_file(
     }
 
     VirtualFatFile* file = &vfat->files[vfat->file_count];
-
-    // Store long filename
-    size_t fn_len = strlen(filename);
-    if(fn_len >= sizeof(file->long_name)) fn_len = sizeof(file->long_name) - 1;
-    memcpy(file->long_name, filename, fn_len);
-    file->long_name[fn_len] = '\0';
-
-    // Parse filename to 8.3 format (for compatibility)
-    memset(file->name, ' ', 11);
-
-    const char* dot = strrchr(filename, '.'); // Use last dot
-    size_t name_len = dot ? (size_t)(dot - filename) : strlen(filename);
-    if(name_len > 8) name_len = 8;
-
-    // Convert name to uppercase
-    for(size_t i = 0; i < name_len; i++) {
-        file->name[i] = toupper(filename[i]);
-    }
-
-    if(dot && strlen(dot + 1) > 0) {
-        size_t ext_len = strlen(dot + 1);
-        if(ext_len > 3) ext_len = 3;
-        // Convert extension to uppercase
-        for(size_t i = 0; i < ext_len; i++) {
-            file->name[8 + i] = toupper(dot[1 + i]);
-        }
-    }
+    set_long_name(file, filename, strlen(filename));
+    make_short_name(file->name, filename, true);
 
     // Copy file data
     file->memory_data = malloc(size);
@@ -129,12 +198,7 @@ bool virtual_fat_add_file(
     file->source_type = FILE_SOURCE_MEMORY;
     file->is_directory = false;
     file->parent_index = -1; // Root directory
-    file->start_cluster = vfat->next_cluster;
-
-    // Calculate clusters needed
-    uint32_t clusters_needed =
-        (size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) / (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-    vfat->next_cluster += clusters_needed;
+    file->start_cluster = allocate_clusters(vfat, clusters_for_size(size));
 
     vfat->file_count++;
 
@@ -176,32 +240,8 @@ bool virtual_fat_add_sd_file(
     storage_file_free(file);
 
     VirtualFatFile* vfat_file = &vfat->files[vfat->file_count];
-
-    // Store long filename
-    size_t fn_len = strlen(filename);
-    if(fn_len >= sizeof(vfat_file->long_name)) fn_len = sizeof(vfat_file->long_name) - 1;
-    memcpy(vfat_file->long_name, filename, fn_len);
-    vfat_file->long_name[fn_len] = '\0';
-
-    // Parse filename to 8.3 format
-    memset(vfat_file->name, ' ', 11);
-
-    const char* dot = strrchr(filename, '.'); // Use last dot
-    size_t name_len = dot ? (size_t)(dot - filename) : strlen(filename);
-    if(name_len > 8) name_len = 8;
-
-    // Convert to uppercase
-    for(size_t i = 0; i < name_len; i++) {
-        vfat_file->name[i] = toupper(filename[i]);
-    }
-
-    if(dot && strlen(dot + 1) > 0) {
-        size_t ext_len = strlen(dot + 1);
-        if(ext_len > 3) ext_len = 3;
-        for(size_t i = 0; i < ext_len; i++) {
-            vfat_file->name[8 + i] = toupper(dot[1 + i]);
-        }
-    }
+    set_long_name(vfat_file, filename, strlen(filename));
+    make_short_name(vfat_file->name, filename, true);
 
     // Store SD path
     vfat_file->sd_path = furi_string_alloc_set(sd_path);
@@ -209,12 +249,7 @@ bool virtual_fat_add_sd_file(
     vfat_file->source_type = FILE_SOURCE_SD_CARD;
     vfat_file->is_directory = false;
     vfat_file->parent_index = -1; // Root directory
-    vfat_file->start_cluster = vfat->next_cluster;
-
-    // Calculate clusters needed
-    uint32_t clusters_needed = (vfat_file->size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) /
-                               (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-    vfat->next_cluster += clusters_needed;
+    vfat_file->start_cluster = allocate_clusters(vfat, clusters_for_size(vfat_file->size));
 
     vfat->file_count++;
 
@@ -229,21 +264,20 @@ bool virtual_fat_add_sd_file(
     return true;
 }
 
+// FAT names are case-insensitive
+static bool names_equal(const char* a, const char* b) {
+    while(*a && toupper((unsigned char)*a) == toupper((unsigned char)*b)) {
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
 // Helper: Find directory by name in parent
 static int8_t find_directory(VirtualFat* vfat, const char* name, int8_t parent_index) {
-    char search_name[11];
-    memset(search_name, ' ', 11);
-
-    size_t name_len = strlen(name);
-    if(name_len > 8) name_len = 8;
-
-    for(size_t i = 0; i < name_len; i++) {
-        search_name[i] = toupper(name[i]);
-    }
-
     for(uint8_t i = 0; i < vfat->file_count; i++) {
         if(vfat->files[i].is_directory && vfat->files[i].parent_index == parent_index &&
-           memcmp(vfat->files[i].name, search_name, 11) == 0) {
+           names_equal(vfat->files[i].long_name, name)) {
             return i;
         }
     }
@@ -257,33 +291,15 @@ bool virtual_fat_add_directory(VirtualFat* vfat, const char* dirname) {
     }
 
     VirtualFatFile* dir = &vfat->files[vfat->file_count];
-
-    // Store long dirname
-    size_t dn_len = strlen(dirname);
-    if(dn_len >= sizeof(dir->long_name)) dn_len = sizeof(dir->long_name) - 1;
-    memcpy(dir->long_name, dirname, dn_len);
-    dir->long_name[dn_len] = '\0';
-
-    // Parse dirname to 8.3 format
-    memset(dir->name, ' ', 11);
-
-    size_t name_len = strlen(dirname);
-    if(name_len > 8) name_len = 8;
-
-    // Convert to uppercase
-    for(size_t i = 0; i < name_len; i++) {
-        dir->name[i] = toupper(dirname[i]);
-    }
+    set_long_name(dir, dirname, strlen(dirname));
+    make_short_name(dir->name, dirname, false);
 
     dir->size = 0;
     dir->source_type = FILE_SOURCE_MEMORY;
     dir->memory_data = NULL;
     dir->is_directory = true;
     dir->parent_index = -1; // Root directory
-    dir->start_cluster = vfat->next_cluster;
-
-    // Directories take 1 cluster
-    vfat->next_cluster++;
+    dir->start_cluster = allocate_clusters(vfat, 1); // Directories take 1 cluster
 
     vfat->file_count++;
 
@@ -332,29 +348,16 @@ static int8_t create_directory_path(VirtualFat* vfat, const char* path) {
             }
 
             VirtualFatFile* dir = &vfat->files[vfat->file_count];
-
-            // Store long name
-            if(token_len >= sizeof(dir->long_name)) token_len = sizeof(dir->long_name) - 1;
-            memcpy(dir->long_name, token, token_len);
-            dir->long_name[token_len] = '\0';
-
-            // Parse name to 8.3 format
-            memset(dir->name, ' ', 11);
-            size_t name_len = token_len;
-            if(name_len > 8) name_len = 8;
-
-            for(size_t i = 0; i < name_len; i++) {
-                dir->name[i] = toupper(token[i]);
-            }
+            set_long_name(dir, token, token_len);
+            make_short_name(dir->name, token, false);
 
             dir->size = 0;
             dir->source_type = FILE_SOURCE_MEMORY;
             dir->memory_data = NULL;
             dir->is_directory = true;
             dir->parent_index = current_parent;
-            dir->start_cluster = vfat->next_cluster;
+            dir->start_cluster = allocate_clusters(vfat, 1);
 
-            vfat->next_cluster++;
             dir_index = vfat->file_count;
             vfat->file_count++;
 
@@ -403,42 +406,15 @@ bool virtual_fat_add_file_to_subdir(
     storage_file_free(file);
 
     VirtualFatFile* vfat_file = &vfat->files[vfat->file_count];
-
-    // Store long filename
-    size_t fn_len = strlen(filename);
-    if(fn_len >= sizeof(vfat_file->long_name)) fn_len = sizeof(vfat_file->long_name) - 1;
-    memcpy(vfat_file->long_name, filename, fn_len);
-    vfat_file->long_name[fn_len] = '\0';
-
-    // Parse filename to 8.3 format
-    memset(vfat_file->name, ' ', 11);
-
-    const char* dot = strrchr(filename, '.'); // Use last dot
-    size_t name_len = dot ? (size_t)(dot - filename) : strlen(filename);
-    if(name_len > 8) name_len = 8;
-
-    for(size_t i = 0; i < name_len; i++) {
-        vfat_file->name[i] = toupper(filename[i]);
-    }
-
-    if(dot && strlen(dot + 1) > 0) {
-        size_t ext_len = strlen(dot + 1);
-        if(ext_len > 3) ext_len = 3;
-        for(size_t i = 0; i < ext_len; i++) {
-            vfat_file->name[8 + i] = toupper(dot[1 + i]);
-        }
-    }
+    set_long_name(vfat_file, filename, strlen(filename));
+    make_short_name(vfat_file->name, filename, true);
 
     vfat_file->sd_path = furi_string_alloc_set(sd_path);
     vfat_file->size = (uint32_t)file_size;
     vfat_file->source_type = FILE_SOURCE_SD_CARD;
     vfat_file->is_directory = false;
     vfat_file->parent_index = parent_index;
-    vfat_file->start_cluster = vfat->next_cluster;
-
-    uint32_t clusters_needed = (vfat_file->size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) /
-                               (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-    vfat->next_cluster += clusters_needed;
+    vfat_file->start_cluster = allocate_clusters(vfat, clusters_for_size(vfat_file->size));
 
     vfat->file_count++;
 
@@ -449,6 +425,213 @@ bool virtual_fat_add_file_to_subdir(
         parent_index,
         vfat_file->size,
         vfat_file->start_cluster);
+
+    return true;
+}
+
+void virtual_fat_set_allocation_start(VirtualFat* vfat, uint32_t cluster) {
+    if(vfat == NULL) return;
+    if(cluster > vfat->next_cluster) vfat->next_cluster = cluster;
+}
+
+bool virtual_fat_add_static_file(
+    VirtualFat* vfat,
+    const char* parent_dir,
+    const char* filename,
+    const uint8_t* data,
+    uint32_t size) {
+    if(vfat == NULL || data == NULL) return false;
+
+    // Parent first, so it is placed before the file
+    int8_t parent_index = -1;
+    if(parent_dir != NULL && parent_dir[0] != '\0') {
+        parent_index = create_directory_path(vfat, parent_dir);
+        if(parent_index < 0) {
+            B2F_LOG_E(TAG, "Failed to create parent directory: %s", parent_dir);
+            return false;
+        }
+    }
+    if(vfat->file_count >= MAX_FILES) {
+        B2F_LOG_E(TAG, "Cannot add static file: filesystem full");
+        return false;
+    }
+
+    VirtualFatFile* file = &vfat->files[vfat->file_count];
+    memset(file, 0, sizeof(VirtualFatFile));
+    set_long_name(file, filename, strlen(filename));
+    make_short_name(file->name, filename, true);
+    file->size = size;
+    file->source_type = FILE_SOURCE_MEMORY;
+    file->memory_data = data;
+    file->static_data = true;
+    file->parent_index = parent_index;
+    file->start_cluster = allocate_clusters(vfat, clusters_for_size(size));
+    vfat->file_count++;
+
+    B2F_LOG_I(
+        TAG,
+        "Added static file: %.11s, parent: %d, size: %lu, cluster: %lu",
+        file->name,
+        parent_index,
+        size,
+        file->start_cluster);
+    return true;
+}
+
+bool virtual_fat_add_directory_path(VirtualFat* vfat, const char* path, uint8_t attributes) {
+    if(vfat == NULL) return false;
+
+    int8_t dir_index = create_directory_path(vfat, path);
+    if(dir_index < 0) {
+        B2F_LOG_E(TAG, "Failed to create directory: %s", path);
+        return false;
+    }
+    vfat->files[dir_index].attributes = attributes;
+    return true;
+}
+
+// Check that clusters for a fixed file or directory are in range and free
+static bool fixed_clusters_free(
+    VirtualFat* vfat,
+    const char* name,
+    uint32_t start_cluster,
+    uint32_t clusters) {
+    // Root directory is cluster 2, and the clusters must be in the partition
+    if(start_cluster < 3 || start_cluster + clusters > DATA_CLUSTERS(PARTITION_SECTORS_GPT) + 2) {
+        B2F_LOG_E(TAG, "Fixed %s: cluster %lu out of range", name, start_cluster);
+        return false;
+    }
+    for(uint8_t i = 0; i < vfat->file_count; i++) {
+        VirtualFatFile* other = &vfat->files[i];
+        if(start_cluster < other->start_cluster + file_clusters(other) &&
+           other->start_cluster < start_cluster + clusters) {
+            B2F_LOG_E(TAG, "Fixed %s: cluster %lu is taken", name, start_cluster);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Create the parents of a fixed entry, placed around the entry's clusters
+static bool create_fixed_parent(
+    VirtualFat* vfat,
+    const char* parent_dir,
+    uint32_t start_cluster,
+    uint32_t clusters,
+    int8_t* parent_index) {
+    *parent_index = -1;
+    if(parent_dir == NULL || parent_dir[0] == '\0') return true;
+
+    vfat->held_start = start_cluster;
+    vfat->held_end = start_cluster + clusters;
+    *parent_index = create_directory_path(vfat, parent_dir);
+    vfat->held_start = vfat->held_end = 0;
+    if(*parent_index < 0) {
+        B2F_LOG_E(TAG, "Failed to create parent directory: %s", parent_dir);
+        return false;
+    }
+    return true;
+}
+
+bool virtual_fat_add_fixed_directory(
+    VirtualFat* vfat,
+    const char* path,
+    uint32_t start_cluster,
+    uint8_t attributes) {
+    if(vfat == NULL || path == NULL) return false;
+    if(vfat->file_count >= MAX_FILES) {
+        B2F_LOG_E(TAG, "Cannot add fixed directory: filesystem full");
+        return false;
+    }
+
+    // Split "parent/name"
+    const char* name = strrchr(path, '/');
+    char parent_dir[256] = "";
+    if(name != NULL) {
+        size_t parent_len = name - path;
+        if(parent_len >= sizeof(parent_dir)) parent_len = sizeof(parent_dir) - 1;
+        memcpy(parent_dir, path, parent_len);
+        parent_dir[parent_len] = '\0';
+        name++;
+    } else {
+        name = path;
+    }
+
+    int8_t parent_index;
+    if(!fixed_clusters_free(vfat, path, start_cluster, 1) ||
+       !create_fixed_parent(vfat, parent_dir, start_cluster, 1, &parent_index)) {
+        return false;
+    }
+    if(vfat->file_count >= MAX_FILES || find_directory(vfat, name, parent_index) >= 0) {
+        B2F_LOG_E(TAG, "Cannot add fixed directory: %s", path);
+        return false;
+    }
+
+    VirtualFatFile* dir = &vfat->files[vfat->file_count];
+    memset(dir, 0, sizeof(VirtualFatFile));
+    set_long_name(dir, name, strlen(name));
+    make_short_name(dir->name, name, false);
+    dir->source_type = FILE_SOURCE_MEMORY;
+    dir->is_directory = true;
+    dir->fixed = true;
+    dir->attributes = attributes;
+    dir->parent_index = parent_index;
+    dir->start_cluster = start_cluster;
+    vfat->file_count++;
+    vfat->used_clusters++;
+
+    B2F_LOG_I(TAG, "Added fixed directory: %.11s, cluster: %lu", dir->name, start_cluster);
+    return true;
+}
+
+bool virtual_fat_add_fixed_file(
+    VirtualFat* vfat,
+    const char* parent_dir,
+    const char* filename,
+    uint32_t start_cluster,
+    uint8_t* buffer,
+    uint32_t size,
+    VirtualFatFileWriteCallback callback,
+    void* context) {
+    if(vfat == NULL || buffer == NULL || size == 0) return false;
+    if(vfat->file_count >= MAX_FILES) {
+        B2F_LOG_E(TAG, "Cannot add fixed file: filesystem full");
+        return false;
+    }
+
+    uint32_t clusters = clusters_for_size(size);
+    int8_t parent_index;
+    if(!fixed_clusters_free(vfat, filename, start_cluster, clusters) ||
+       !create_fixed_parent(vfat, parent_dir, start_cluster, clusters, &parent_index)) {
+        return false;
+    }
+    if(vfat->file_count >= MAX_FILES) {
+        B2F_LOG_E(TAG, "Cannot add fixed file: filesystem full");
+        return false;
+    }
+
+    VirtualFatFile* file = &vfat->files[vfat->file_count];
+    memset(file, 0, sizeof(VirtualFatFile));
+    set_long_name(file, filename, strlen(filename));
+    make_short_name(file->name, filename, true);
+    file->size = size;
+    file->source_type = FILE_SOURCE_BUFFER;
+    file->buffer = buffer;
+    file->write_callback = callback;
+    file->write_context = context;
+    file->fixed = true;
+    file->parent_index = parent_index;
+    file->start_cluster = start_cluster;
+    vfat->file_count++;
+    vfat->used_clusters += clusters;
+
+    B2F_LOG_I(
+        TAG,
+        "Added fixed file: %.11s, parent: %d, size: %lu, cluster: %lu",
+        file->name,
+        file->parent_index,
+        file->size,
+        file->start_cluster);
 
     return true;
 }
@@ -525,7 +708,7 @@ static void generate_boot_sector(uint8_t* buffer, uint32_t total_sectors) {
     buffer[68] = 0x34;
     buffer[69] = 0x56;
     buffer[70] = 0x78;
-    memcpy(&buffer[71], "Boot2Flippr", 11);   // Volume label (11 bytes)
+    memcpy(&buffer[71], BPB_VOLUME_LABEL, 11); // Volume label (11 bytes)
     memcpy(&buffer[82], "FAT32   ", 8);       // File system type (8 bytes)
 
     // FAT32 Bootstrap code - only runs if something chainloads the partition.
@@ -602,12 +785,25 @@ static void
     buffer[511] = 0xAA;
 }
 
-static void generate_fat_sector(VirtualFat* vfat, uint32_t fat_sector, uint8_t* buffer) {
+static void generate_fat_sector(
+    VirtualFat* vfat,
+    uint32_t fat_sector,
+    uint32_t data_clusters,
+    uint8_t* buffer) {
     memset(buffer, 0, SECTOR_SIZE);
 
     uint32_t* fat = (uint32_t*)buffer;
     uint32_t entries_per_sector = SECTOR_SIZE / 4;
     uint32_t first_entry = fat_sector * entries_per_sector;
+
+    // WRITE_MODE_BAD: every free cluster is bad, files below overwrite theirs
+    if(vfat->write_mode == WRITE_MODE_BAD) {
+        uint32_t from = MAX(first_entry, 3u); // Cluster 2 is the root directory
+        uint32_t to = MIN(first_entry + entries_per_sector, data_clusters + 2);
+        for(uint32_t cluster_num = from; cluster_num < to; cluster_num++) {
+            fat[cluster_num - first_entry] = FAT_ENTRY_BAD;
+        }
+    }
 
     // First FAT sector has special entries
     if(fat_sector == 0) {
@@ -620,16 +816,7 @@ static void generate_fat_sector(VirtualFat* vfat, uint32_t fat_sector, uint8_t* 
     for(uint8_t i = 0; i < vfat->file_count; i++) {
         VirtualFatFile* file = &vfat->files[i];
 
-        uint32_t clusters;
-        if(file->is_directory) {
-            // Directories always have at least 1 cluster
-            clusters = 1;
-        } else {
-            // Files: calculate based on size
-            clusters = (file->size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) /
-                       (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-        }
-
+        uint32_t clusters = file_clusters(file);
         if(clusters == 0) continue;
 
         // Only visit the part of the chain that falls in this FAT sector
@@ -758,6 +945,11 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
 
     B2F_LOG_I(TAG, "Generating root directory, file_count: %u", vfat->file_count);
 
+    // Hosts show the volume label entry, not the one in the boot sector
+    write_directory_entry(entry, VOLUME_LABEL, FAT_ATTR_VOLUME_ID, 0, 0);
+    entry += 32;
+    entry_count++;
+
     // Only show files/dirs with parent_index == -1 (root)
     for(uint8_t i = 0; i < vfat->file_count && entry_count < (SECTOR_SIZE / 32); i++) {
         VirtualFatFile* file = &vfat->files[i];
@@ -785,7 +977,8 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
         }
 
         // Write 8.3 directory entry
-        uint8_t attributes = file->is_directory ? 0x10 : 0x20;
+        uint8_t attributes = (file->is_directory ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE) |
+                             file->attributes;
         write_directory_entry(entry, file->name, attributes, file->start_cluster, file->size);
 
         B2F_LOG_I(
@@ -861,7 +1054,8 @@ static void generate_subdirectory(VirtualFat* vfat, int8_t dir_index, uint8_t* b
         }
 
         // Write 8.3 directory entry
-        uint8_t attributes = file->is_directory ? 0x10 : 0x20;
+        uint8_t attributes = (file->is_directory ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE) |
+                             file->attributes;
         write_directory_entry(entry, file->name, attributes, file->start_cluster, file->size);
 
         entry += 32;
@@ -928,11 +1122,36 @@ static bool sd_file_read(
     return true;
 }
 
+// Index of lba in the write cache, write_cache_count if not cached
+static uint8_t write_cache_find(VirtualFat* vfat, uint32_t lba) {
+    uint8_t i = 0;
+    while(i < vfat->write_cache_count && vfat->write_cache_lba[i] != lba)
+        i++;
+    return i;
+}
+
+// Sector content as generated, without the host's writes. notify calls the read
+// callback, which a comparison must not do.
+static bool
+    generate_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, uint8_t* buffer, bool notify);
+
 bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, uint8_t* buffer) {
     if(vfat == NULL || buffer == NULL) return false;
 
     B2F_LOG_IO(TAG, "Reading LBA %lu", lba);
 
+    // Sectors the host wrote in WRITE_MODE_MEMORY
+    uint8_t cached = write_cache_find(vfat, lba);
+    if(cached < vfat->write_cache_count) {
+        memcpy(buffer, vfat->write_cache + cached * SECTOR_SIZE, SECTOR_SIZE);
+        return true;
+    }
+
+    return generate_sector(storage, vfat, lba, buffer, true);
+}
+
+static bool
+    generate_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, uint8_t* buffer, bool notify) {
     // Partition size depends on scheme (use macros from virtual_fat.h)
     const bool gpt = vfat->partition_scheme != PARTITION_SCHEME_MBR_ONLY;
     const uint32_t PARTITION_SECTORS = gpt ? PARTITION_SECTORS_GPT : PARTITION_SECTORS_MBR;
@@ -941,7 +1160,12 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     uint32_t fat1_start = PARTITION_START + RESERVED_SECTORS;
     uint32_t fat2_start = fat1_start + fat_size;
     uint32_t data_start = fat2_start + fat_size;
-    uint32_t free_clusters = DATA_CLUSTERS(PARTITION_SECTORS) - (vfat->next_cluster - 2);
+    uint32_t free_clusters = DATA_CLUSTERS(PARTITION_SECTORS) - 1 - vfat->used_clusters;
+    uint32_t next_free_cluster = vfat->next_cluster;
+    if(vfat->write_mode == WRITE_MODE_BAD) {
+        free_clusters = 0;
+        next_free_cluster = 0xFFFFFFFF; // Unknown
+    }
 
     // LBA 0: MBR or Protective MBR depending on partition scheme
     if(lba == 0) {
@@ -1000,6 +1224,11 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
             params.initrd_lba = data_start + (initrd->start_cluster - 2) * SECTORS_PER_CLUSTER;
             params.initrd_size = initrd->size;
         }
+        if(vfat->bios_cmdline_index >= 0) {
+            VirtualFatFile* cmdline = &vfat->files[vfat->bios_cmdline_index];
+            params.cmdline_lba = data_start + (cmdline->start_cluster - 2) * SECTORS_PER_CLUSTER;
+            params.cmdline_size = cmdline->size;
+        }
         bios_boot_read_stage2_sector(lba, &params, buffer);
         return true;
     }
@@ -1040,7 +1269,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // FS Info sector at LBA 2
     if(lba == PARTITION_START + 1) {
-        generate_fsinfo_sector(buffer, free_clusters, vfat->next_cluster);
+        generate_fsinfo_sector(buffer, free_clusters, next_free_cluster);
         return true;
     }
 
@@ -1052,7 +1281,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // Backup FS Info sector at LBA 8
     if(lba == PARTITION_START + 7) {
-        generate_fsinfo_sector(buffer, free_clusters, vfat->next_cluster);
+        generate_fsinfo_sector(buffer, free_clusters, next_free_cluster);
         return true;
     }
 
@@ -1064,13 +1293,13 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // FAT1
     if(lba >= fat1_start && lba < fat2_start) {
-        generate_fat_sector(vfat, lba - fat1_start, buffer);
+        generate_fat_sector(vfat, lba - fat1_start, DATA_CLUSTERS(PARTITION_SECTORS), buffer);
         return true;
     }
 
     // FAT2 (copy of FAT1)
     if(lba >= fat2_start && lba < data_start) {
-        generate_fat_sector(vfat, lba - fat2_start, buffer);
+        generate_fat_sector(vfat, lba - fat2_start, DATA_CLUSTERS(PARTITION_SECTORS), buffer);
         return true;
     }
 
@@ -1099,11 +1328,8 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
             // For regular files, check cluster range
             if(!file->is_directory) {
-                uint32_t file_clusters = (file->size + (SECTORS_PER_CLUSTER * SECTOR_SIZE) - 1) /
-                                         (SECTORS_PER_CLUSTER * SECTOR_SIZE);
-
                 if(cluster_num >= file->start_cluster &&
-                   cluster_num < file->start_cluster + file_clusters) {
+                   cluster_num < file->start_cluster + file_clusters(file)) {
                     // This sector belongs to this file
                     uint32_t file_cluster = cluster_num - file->start_cluster;
                     uint32_t file_sector = file_cluster * SECTORS_PER_CLUSTER + sector_in_cluster;
@@ -1118,7 +1344,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
                         file->size);
 
                     // Trigger callback if set (only on first sector of file to avoid spam)
-                    if(vfat->read_callback && offset == 0) {
+                    if(notify && vfat->read_callback && offset == 0) {
                         const char* display_name = file->long_name[0] != '\0' ? file->long_name :
                                                                                 NULL;
                         if(display_name == NULL) {
@@ -1141,7 +1367,9 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
                         uint32_t copy_size = file->size - offset;
                         if(copy_size > SECTOR_SIZE) copy_size = SECTOR_SIZE;
 
-                        if(file->source_type == FILE_SOURCE_MEMORY) {
+                        if(file->source_type == FILE_SOURCE_BUFFER) {
+                            memcpy(buffer, file->buffer + offset, copy_size);
+                        } else if(file->source_type == FILE_SOURCE_MEMORY) {
                             // Read from RAM
                             B2F_LOG_IO(
                                 TAG,
@@ -1168,6 +1396,83 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     return false;
 }
 
+bool virtual_fat_write_sector(
+    Storage* storage,
+    VirtualFat* vfat,
+    uint32_t lba,
+    const uint8_t* buffer) {
+    if(vfat == NULL || buffer == NULL) return false;
+
+    // Writable fixed files take writes in every mode
+    if(lba >= DATA_START_LBA) {
+        uint32_t cluster_num = LBA_TO_CLUSTER(lba);
+        uint32_t sector_in_cluster = (lba - DATA_START_LBA) % SECTORS_PER_CLUSTER;
+
+        for(uint8_t i = 0; i < vfat->file_count; i++) {
+            VirtualFatFile* file = &vfat->files[i];
+            if(file->source_type != FILE_SOURCE_BUFFER || file->write_callback == NULL ||
+               cluster_num < file->start_cluster ||
+               cluster_num >= file->start_cluster + file_clusters(file)) {
+                continue;
+            }
+
+            uint32_t offset =
+                ((cluster_num - file->start_cluster) * SECTORS_PER_CLUSTER + sector_in_cluster) *
+                SECTOR_SIZE;
+            if(offset >= file->size) return true;
+            uint32_t size = file->size - offset;
+            if(size > SECTOR_SIZE) size = SECTOR_SIZE;
+
+            B2F_LOG_IO(TAG, "Writing file %.11s, offset %lu, size %lu", file->name, offset, size);
+            memcpy(file->buffer + offset, buffer, size);
+            file->write_callback(file->write_context, offset, size);
+            return true;
+        }
+    }
+
+    switch(vfat->write_mode) {
+    case WRITE_MODE_MEMORY: {
+        if(vfat->write_cache == NULL) return false;
+        uint8_t i = write_cache_find(vfat, lba);
+
+        // Hosts rewrite whole runs of FAT sectors, so only keep what changed. A
+        // sector written back to its generated content frees its slot.
+        uint8_t* generated = vfat->write_cache + WRITE_CACHE_SECTORS * SECTOR_SIZE;
+        if(generate_sector(storage, vfat, lba, generated, false) &&
+           memcmp(generated, buffer, SECTOR_SIZE) == 0) {
+            if(i < vfat->write_cache_count) {
+                vfat->write_cache_count--;
+                vfat->write_cache_lba[i] = vfat->write_cache_lba[vfat->write_cache_count];
+                memcpy(
+                    vfat->write_cache + i * SECTOR_SIZE,
+                    vfat->write_cache + vfat->write_cache_count * SECTOR_SIZE,
+                    SECTOR_SIZE);
+            }
+            B2F_LOG_IO(TAG, "Unchanged write to LBA %lu", lba);
+            return true;
+        }
+
+        if(i == vfat->write_cache_count) {
+            if(i == WRITE_CACHE_SECTORS) {
+                B2F_LOG_W(TAG, "Write cache full, refused write to LBA %lu", lba);
+                return false;
+            }
+            vfat->write_cache_lba[i] = lba;
+            vfat->write_cache_count++;
+        }
+        B2F_LOG_IO(TAG, "Cached write to LBA %lu", lba);
+        memcpy(vfat->write_cache + i * SECTOR_SIZE, buffer, SECTOR_SIZE);
+        return true;
+    }
+    case WRITE_MODE_BAD:
+        B2F_LOG_IO(TAG, "Dropped write to LBA %lu", lba);
+        return true;
+    default:
+        B2F_LOG_IO(TAG, "Refused write to LBA %lu (read-only)", lba);
+        return false;
+    }
+}
+
 uint32_t virtual_fat_get_total_sectors(VirtualFat* vfat) {
     UNUSED(vfat);
     return TOTAL_SECTORS;
@@ -1184,11 +1489,49 @@ void virtual_fat_set_partition_scheme(VirtualFat* vfat, PartitionScheme scheme) 
                                               "Hybrid");
 }
 
-static int8_t find_root_file(VirtualFat* vfat, const char* filename) {
+void virtual_fat_set_write_mode(VirtualFat* vfat, WriteMode mode) {
+    if(vfat == NULL) return;
+    vfat->write_mode = mode;
+
+    // The cache only exists in memory mode, so other modes cost no RAM. The extra
+    // sector holds generated content to compare writes with.
+    free(vfat->write_cache);
+    vfat->write_cache =
+        mode == WRITE_MODE_MEMORY ? malloc((WRITE_CACHE_SECTORS + 1) * SECTOR_SIZE) : NULL;
+    vfat->write_cache_count = 0;
+
+    B2F_LOG_I(
+        TAG,
+        "Write mode set to: %s",
+        mode == WRITE_MODE_READ_ONLY ? "Read-only" :
+        mode == WRITE_MODE_MEMORY    ? "Memory" :
+                                       "Bad");
+}
+
+bool virtual_fat_is_write_protected(VirtualFat* vfat) {
+    return vfat == NULL || vfat->write_mode == WRITE_MODE_READ_ONLY;
+}
+
+// Find a file by path (e.g., "EFI/BOOT/BOOTX64.EFI"), -1 if not found
+static int8_t find_file(VirtualFat* vfat, const char* path) {
+    int8_t parent_index = -1;
+    const char* name = path;
+    const char* slash;
+    while((slash = strchr(name, '/')) != NULL) {
+        char dirname[64];
+        size_t length = slash - name;
+        if(length >= sizeof(dirname)) return -1;
+        memcpy(dirname, name, length);
+        dirname[length] = '\0';
+        parent_index = find_directory(vfat, dirname, parent_index);
+        if(parent_index < 0) return -1;
+        name = slash + 1;
+    }
+
     for(uint8_t i = 0; i < vfat->file_count; i++) {
         VirtualFatFile* file = &vfat->files[i];
-        if(!file->is_directory && file->parent_index == -1 &&
-           strcmp(file->long_name, filename) == 0) {
+        if(!file->is_directory && file->parent_index == parent_index &&
+           names_equal(file->long_name, name)) {
             return i;
         }
     }
@@ -1197,19 +1540,27 @@ static int8_t find_root_file(VirtualFat* vfat, const char* filename) {
 
 bool virtual_fat_set_bios_boot_files(
     VirtualFat* vfat,
-    const char* kernel_filename,
-    const char* initrd_filename) {
+    const char* kernel_path,
+    const char* initrd_path,
+    const char* cmdline_path) {
     if(vfat == NULL) return false;
 
-    vfat->bios_kernel_index = find_root_file(vfat, kernel_filename);
-    vfat->bios_initrd_index = initrd_filename ? find_root_file(vfat, initrd_filename) : -1;
+    vfat->bios_kernel_index = find_file(vfat, kernel_path);
+    vfat->bios_initrd_index = initrd_path ? find_file(vfat, initrd_path) : -1;
+    vfat->bios_cmdline_index = cmdline_path ? find_file(vfat, cmdline_path) : -1;
 
     if(vfat->bios_kernel_index < 0) {
-        B2F_LOG_E(TAG, "BIOS boot kernel not found: %s", kernel_filename);
+        B2F_LOG_E(TAG, "BIOS boot kernel not found: %s", kernel_path);
         return false;
     }
-    if(initrd_filename && vfat->bios_initrd_index < 0) {
-        B2F_LOG_E(TAG, "BIOS boot initrd not found: %s", initrd_filename);
+    if(initrd_path && vfat->bios_initrd_index < 0) {
+        B2F_LOG_E(TAG, "BIOS boot initrd not found: %s", initrd_path);
+        return false;
+    }
+    if(cmdline_path && (vfat->bios_cmdline_index < 0 ||
+                        vfat->files[vfat->bios_cmdline_index].size > BIOS_BOOT_CMDLINE_MAX)) {
+        B2F_LOG_E(TAG, "BIOS boot command line missing or too long: %s", cmdline_path);
+        vfat->bios_cmdline_index = -1;
         return false;
     }
     return true;

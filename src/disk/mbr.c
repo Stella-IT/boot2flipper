@@ -3,6 +3,9 @@
 
 #define SECTOR_SIZE 512
 
+// Windows writes a random signature to an MBR disk that has none
+#define MBR_DISK_SIGNATURE 0x50463242 // "B2FP"
+
 static void write_partition_entry(
     uint8_t* partition,
     bool bootable,
@@ -46,6 +49,12 @@ bool generate_mbr(
     memset(buffer, 0, SECTOR_SIZE);
 
     // Boot code (bytes 0-439) is filled in by bios_boot_write_mbr_code()
+
+    // Disk signature at offset 440 (0x1B8)
+    buffer[440] = MBR_DISK_SIGNATURE & 0xFF;
+    buffer[441] = (MBR_DISK_SIGNATURE >> 8) & 0xFF;
+    buffer[442] = (MBR_DISK_SIGNATURE >> 16) & 0xFF;
+    buffer[443] = (MBR_DISK_SIGNATURE >> 24) & 0xFF;
 
     // Partition table starts at offset 446 (0x1BE)
     write_partition_entry(

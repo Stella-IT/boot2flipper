@@ -6,9 +6,12 @@
  * STAGE2_LBA, which sits in the unpartitioned gap before the FAT32 partition.
  *
  * Stage 2 loads IPXE.LKR (a bzImage, Linux boot protocol >= 2.02) and passes
- * BOOT.CFG as its initrd. iPXE registers the initrd as an image and executes
- * it as a script, which is how the generated script reaches BIOS iPXE (it
- * cannot read AUTOEXEC.IPXE from the USB disk the way the EFI build does).
+ * BOOT.CFG as its command line, which iPXE runs as a script. This is how the
+ * generated script reaches BIOS iPXE (it cannot read AUTOEXEC.IPXE from the
+ * USB disk the way the EFI build does). The initrd (.B2F/bin/b2f.pxe) is
+ * registered by iPXE as the image "<INITRD>" for the script to run. Either
+ * can be left out; a script too long for the command line is passed as the
+ * initrd instead, which iPXE then runs.
  *
  * The disk is generated on the fly, so instead of parsing FAT the file
  * locations are patched into the parameter block at the start of stage 2.
@@ -34,6 +37,7 @@
 	.set	CHUNK_SECTORS, 32	/* 16KB per disk read */
 	.set	HEAP_END, 0xe000	/* offsets within KERNEL_SEG */
 	.set	CMDLINE_OFF, 0xe000
+	.set	CMDLINE_MAX, 2047	/* iPXE's cmdline_size */
 
 /*****************************************************************************
  * Stage 1 (MBR)
@@ -117,6 +121,10 @@ initrd_lba:
 	.long	0
 initrd_size:
 	.long	0
+cmdline_lba:
+	.long	0
+cmdline_size:
+	.long	0
 
 stage2_main:
 	movw	$msg_banner, %si
@@ -185,13 +193,29 @@ stage2_main:
 	movw	$msg_ok, %si
 	call	print
 1:
+	/* Command line (the iPXE script) */
+	movl	cmdline_size, %ecx
+	testl	%ecx, %ecx
+	jz	1f
+	cmpl	$CMDLINE_MAX, %ecx
+	ja	bad_cmdline
+	movw	$msg_cmdline, %si
+	call	print
+	movl	cmdline_lba, %eax
+	movl	$((KERNEL_SEG << 4) + CMDLINE_OFF), %edi
+	call	load
+	jc	disk_error
+	movw	$msg_ok, %si
+	call	print
+1:
 	/* Fill in the setup header */
 	movw	$KERNEL_SEG, %ax
 	movw	%ax, %es
 	movb	$0xff, %es:0x210	/* type_of_loader: undefined */
 	orb	$0x80, %es:0x211	/* CAN_USE_HEAP */
 	movw	$(HEAP_END - 0x200), %es:0x224
-	movb	$0, %es:CMDLINE_OFF
+	movw	cmdline_size, %bx
+	movb	$0, %es:CMDLINE_OFF(%bx)
 	movl	$((KERNEL_SEG << 4) + CMDLINE_OFF), %es:0x228
 	movl	initrd_size, %eax
 	movl	%eax, %es:0x21c
@@ -216,6 +240,9 @@ stage2_main:
 
 disk_error:
 	movw	$msg_disk_error, %si
+	jmp	fatal
+bad_cmdline:
+	movw	$msg_bad_cmdline, %si
 	jmp	fatal
 bad_kernel:
 	movw	$msg_bad_kernel, %si
@@ -334,6 +361,8 @@ msg_banner:
 msg_kernel:
 	.asciz	"Loading IPXE.LKR "
 msg_initrd:
+	.asciz	"Loading initrd "
+msg_cmdline:
 	.asciz	"Loading BOOT.CFG "
 msg_dot:
 	.asciz	"."
@@ -343,6 +372,8 @@ msg_boot:
 	.asciz	"Starting iPXE...\r\n"
 msg_disk_error:
 	.asciz	"\r\nDisk read error"
+msg_bad_cmdline:
+	.asciz	"\r\nBOOT.CFG is too long"
 msg_bad_kernel:
 	.asciz	"\r\nIPXE.LKR is missing or not a valid ipxe.lkrn"
 msg_any_key:
