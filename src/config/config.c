@@ -14,7 +14,7 @@ Boot2FlipperConfig* config_alloc() {
     config->dns = furi_string_alloc_set("8.8.8.8");
     config->chainload_url = furi_string_alloc_set("http://boot.ipxe.org/demo/boot.php");
     config->network_interface = furi_string_alloc_set("auto"); // Default: auto-detect
-    config->partition_scheme = PARTITION_SCHEME_GPT_ONLY; // Default: GPT (UEFI)
+    config->partition_scheme = PARTITION_SCHEME_HYBRID; // Default: BIOS and UEFI
     config->chainload_enabled = true; // Default: chainloading enabled
 
     return config;
@@ -210,12 +210,13 @@ bool config_load(Storage* storage, Boot2FlipperConfig* config, const char* file_
         }
 
         // Read partition scheme (optional for backward compatibility)
-        uint32_t partition_scheme = (uint32_t)PARTITION_SCHEME_GPT_ONLY;
-        if(flipper_format_read_uint32(file, "Partition_Scheme", &partition_scheme, 1)) {
+        uint32_t partition_scheme = (uint32_t)PARTITION_SCHEME_HYBRID;
+        if(flipper_format_read_uint32(file, "Partition_Scheme", &partition_scheme, 1) &&
+           partition_scheme < PARTITION_SCHEME_COUNT) {
             config->partition_scheme = (PartitionScheme)partition_scheme;
         } else {
-            B2F_LOG_W(TAG, "Partition scheme not found, using default (GPT)");
-            config->partition_scheme = PARTITION_SCHEME_GPT_ONLY;
+            B2F_LOG_W(TAG, "Partition scheme missing or invalid, using default (Hybrid)");
+            config->partition_scheme = PARTITION_SCHEME_HYBRID;
         }
 
         // Read chainload enabled flag (optional for backward compatibility)

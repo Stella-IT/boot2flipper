@@ -41,6 +41,8 @@
 typedef enum {
     PARTITION_SCHEME_MBR_ONLY, // MBR (BIOS boot)
     PARTITION_SCHEME_GPT_ONLY, // GPT (UEFI boot)
+    PARTITION_SCHEME_HYBRID, // GPT with a hybrid MBR (BIOS and UEFI boot)
+    PARTITION_SCHEME_COUNT,
 } PartitionScheme;
 
 typedef struct VirtualFat VirtualFat;

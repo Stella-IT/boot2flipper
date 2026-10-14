@@ -45,7 +45,7 @@ VirtualFat* virtual_fat_alloc(void) {
     memset(vfat, 0, sizeof(VirtualFat));
 
     vfat->file_count = 0;
-    vfat->partition_scheme = PARTITION_SCHEME_GPT_ONLY; // Default: GPT (UEFI)
+    vfat->partition_scheme = PARTITION_SCHEME_HYBRID; // Default: BIOS and UEFI
     vfat->next_cluster = 3; // Cluster 2 is root directory, files start at cluster 3
     vfat->bios_kernel_index = -1;
     vfat->bios_initrd_index = -1;
@@ -934,9 +934,8 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     B2F_LOG_IO(TAG, "Reading LBA %lu", lba);
 
     // Partition size depends on scheme (use macros from virtual_fat.h)
-    const uint32_t PARTITION_SECTORS = (vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) ?
-                                           PARTITION_SECTORS_GPT :
-                                           PARTITION_SECTORS_MBR;
+    const bool gpt = vfat->partition_scheme != PARTITION_SCHEME_MBR_ONLY;
+    const uint32_t PARTITION_SECTORS = gpt ? PARTITION_SECTORS_GPT : PARTITION_SECTORS_MBR;
 
     uint32_t fat_size = FAT_SIZE_SECTORS(PARTITION_SECTORS);
     uint32_t fat1_start = PARTITION_START + RESERVED_SECTORS;
@@ -950,6 +949,10 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
             // MBR only - bootable FAT32 partition
             generate_mbr(buffer, PARTITION_START, PARTITION_SECTORS, 0xEF);
             B2F_LOG_D(TAG, "Generated MBR (MBR-only mode)");
+        } else if(vfat->partition_scheme == PARTITION_SCHEME_HYBRID) {
+            // GPT with an active MBR entry for the same partition
+            generate_hybrid_mbr(buffer, PARTITION_START, PARTITION_SECTORS);
+            B2F_LOG_D(TAG, "Generated hybrid MBR (Hybrid mode)");
         } else {
             // GPT only - protective MBR
             generate_protective_mbr(buffer, TOTAL_SECTORS);
@@ -962,7 +965,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // LBA 1: GPT Header (only in GPT mode)
     if(lba == 1) {
-        if(vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) {
+        if(gpt) {
             generate_gpt_header(buffer, TOTAL_SECTORS, PARTITION_START, PARTITION_SECTORS);
             B2F_LOG_D(TAG, "Generated GPT header at LBA 1");
         } else {
@@ -974,7 +977,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
 
     // LBA 2: GPT Partition Entry Array (only in GPT mode)
     if(lba == 2) {
-        if(vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) {
+        if(gpt) {
             generate_gpt_partitions(buffer, PARTITION_START, PARTITION_SECTORS);
             B2F_LOG_D(TAG, "Generated GPT partitions at LBA 2");
         } else {
@@ -1008,7 +1011,7 @@ bool virtual_fat_read_sector(Storage* storage, VirtualFat* vfat, uint32_t lba, u
     }
 
     // Backup GPT structures (only in GPT mode)
-    if(vfat->partition_scheme == PARTITION_SCHEME_GPT_ONLY) {
+    if(gpt) {
         // Backup GPT partition array: starts at GPT_BACKUP_ARRAY_START
         if(lba >= GPT_BACKUP_ARRAY_START && lba < GPT_BACKUP_HEADER) {
             // Only first sector of backup partition array has data (like primary)
@@ -1174,7 +1177,11 @@ void virtual_fat_set_partition_scheme(VirtualFat* vfat, PartitionScheme scheme) 
     if(vfat == NULL) return;
     vfat->partition_scheme = scheme;
     B2F_LOG_I(
-        TAG, "Partition scheme set to: %s", scheme == PARTITION_SCHEME_MBR_ONLY ? "MBR" : "GPT");
+        TAG,
+        "Partition scheme set to: %s",
+        scheme == PARTITION_SCHEME_MBR_ONLY ? "MBR" :
+        scheme == PARTITION_SCHEME_GPT_ONLY ? "GPT" :
+                                              "Hybrid");
 }
 
 static int8_t find_root_file(VirtualFat* vfat, const char* filename) {

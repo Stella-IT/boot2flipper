@@ -12,7 +12,7 @@
 #define TAG        "Home"
 
 static const char* network_mode_names[] = {"DHCP", "Static"};
-static const char* partition_scheme_names[] = {"MBR", "UEFI"};
+static const char* partition_scheme_names[PARTITION_SCHEME_COUNT] = {"MBR", "UEFI", "Hybrid"};
 static const char* chainload_enabled_names[] = {"Disabled", "Enabled"};
 
 // Forward declarations
@@ -128,7 +128,11 @@ static void Home_build_menu(App* app) {
 
     // Partition scheme selector (index 5)
     home->partition_scheme_item = variable_item_list_add(
-        home->var_item_list, "Boot Method", 2, Home_partition_scheme_change, app);
+        home->var_item_list,
+        "Boot Method",
+        PARTITION_SCHEME_COUNT,
+        Home_partition_scheme_change,
+        app);
     uint8_t partition_scheme = (uint8_t)app->config->partition_scheme;
     variable_item_set_current_value_index(home->partition_scheme_item, partition_scheme);
     variable_item_set_current_value_text(
