@@ -3,8 +3,7 @@
 #include <furi.h>
 #include <gui/view.h>
 #include <gui/modules/variable_item_list.h>
-#include <gui/modules/text_input.h>
-#include <gui/modules/number_input.h>
+#include "../../views/ip_input.h"
 
 typedef enum {
     NETWORK_FIELD_IP,
@@ -15,12 +14,12 @@ typedef enum {
 
 typedef enum {
     NETWORK_VIEW_MAIN_LIST = 200,
-    NETWORK_VIEW_NUMBER_INPUT = 201,
+    NETWORK_VIEW_IP_INPUT = 201,
 } NetworkView;
 
 typedef struct {
     VariableItemList* var_item_list;
-    NumberInput* number_input;
+    IpInput* ip_input;
 
     VariableItem* ip_item;
     VariableItem* subnet_item;
@@ -28,10 +27,7 @@ typedef struct {
     VariableItem* dns_item;
 
     // Temporary storage for editing
-    char text_buffer[128];
-
     uint8_t ip_octets[4];
-    uint8_t current_octet;
     NetworkFieldType editing_field;
 
     NetworkView current_view;

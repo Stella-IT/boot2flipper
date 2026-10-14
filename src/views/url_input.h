@@ -25,7 +25,7 @@ View* url_input_get_view(UrlInput* url_input);
 void url_input_set_header_text(UrlInput* url_input, const char* text);
 
 /**
- * Edit text_buffer in place; callback is called when OK is pressed on the save key
+ * Edit text_buffer in place; callback is called when OK is pressed on the Save key
  * @param text_buffer Buffer holding the initial text, edited in place
  * @param text_buffer_size Buffer size including the terminating NUL
  */

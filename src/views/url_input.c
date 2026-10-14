@@ -1,4 +1,5 @@
 #include "url_input.h"
+#include "key_icons.h"
 #include <gui/elements.h>
 #include <ctype.h>
 #include <string.h>
@@ -9,7 +10,7 @@
 #define KEY_HEIGHT    11
 #define KEYS_X        1
 #define KEYS_Y        27 // Top of the first key row
-#define SPECIAL_WIDTH 26
+#define SPECIAL_WIDTH KEY_ICON_SAVE_WIDTH
 #define SPECIAL_X     (127 - SPECIAL_WIDTH)
 #define SPECIAL_COL   KEY_COLUMNS // Column index of the backspace/layer/save keys
 
@@ -33,7 +34,7 @@ static const char* const layer_labels[UrlInputLayerCount] = {"ABC", "123", "abc"
 typedef enum {
     SpecialKeyDelete,
     SpecialKeyLayer,
-    SpecialKeyEnter,
+    SpecialKeySave,
 } SpecialKey; // Indexed by row
 
 struct UrlInput {
@@ -76,14 +77,6 @@ static void url_input_draw_text(Canvas* canvas, UrlInputModel* model) {
     canvas_draw_line(canvas, cursor_x, 14, cursor_x, 22);
 }
 
-// Left arrow with a filled head and a 2px shaft on rows y - 1 and y
-static void url_input_draw_backspace_arrow(Canvas* canvas, int32_t x, int32_t y) {
-    for(int32_t i = 0; i < 3; i++) {
-        canvas_draw_line(canvas, x + i, y - 1 - i, x + i, y + i);
-    }
-    canvas_draw_box(canvas, x + 3, y - 1, 10, 2);
-}
-
 static void url_input_draw_callback(Canvas* canvas, void* _model) {
     UrlInputModel* model = _model;
     canvas_clear(canvas);
@@ -100,43 +93,56 @@ static void url_input_draw_callback(Canvas* canvas, void* _model) {
             int32_t x = KEYS_X + col * KEY_WIDTH;
             bool selected = model->row == row && model->col == col;
             if(selected) {
-                canvas_draw_box(canvas, x, y, KEY_WIDTH, KEY_HEIGHT);
+                canvas_draw_rbox(canvas, x, y, KEY_WIDTH, KEY_HEIGHT, 1);
                 canvas_set_color(canvas, ColorWhite);
             }
-            canvas_draw_glyph(canvas, x + 2, y + 9, keys[col]);
+            canvas_draw_glyph(canvas, x + 1, y + 8, keys[col]);
             canvas_set_color(canvas, ColorBlack);
         }
     }
 
-    // Backspace, layer and save keys on the right, styled like the stock keyboard
+    // Backspace, layer and save keys on the right
+    canvas_set_font(canvas, FontSecondary);
     for(uint8_t row = 0; row < KEY_ROWS; row++) {
         int32_t y = KEYS_Y + row * (KEY_HEIGHT + 1);
         bool selected = model->row == row && model->col == SPECIAL_COL;
 
-        if(selected) {
-            canvas_draw_rbox(canvas, SPECIAL_X, y, SPECIAL_WIDTH, KEY_HEIGHT, 2);
-            canvas_set_color(canvas, ColorWhite);
-        } else {
-            canvas_draw_rframe(canvas, SPECIAL_X, y, SPECIAL_WIDTH, KEY_HEIGHT, 2);
-        }
-
-        canvas_set_font(canvas, FontSecondary);
-        if(row == SpecialKeyDelete) {
-            url_input_draw_backspace_arrow(canvas, SPECIAL_X + 7, y + 6);
-        } else if(row == SpecialKeyLayer) {
+        switch(row) {
+        case SpecialKeyDelete:
+            canvas_draw_xbm(
+                canvas,
+                SPECIAL_X + (SPECIAL_WIDTH - KEY_ICON_WIDTH) / 2,
+                y + (KEY_HEIGHT - KEY_ICON_HEIGHT) / 2,
+                KEY_ICON_WIDTH,
+                KEY_ICON_HEIGHT,
+                selected ? key_icon_backspace_selected_bits : key_icon_backspace_bits);
+            break;
+        case SpecialKeyLayer:
+            if(selected) {
+                canvas_draw_rbox(canvas, SPECIAL_X, y, SPECIAL_WIDTH, KEY_HEIGHT, 1);
+                canvas_set_color(canvas, ColorWhite);
+            } else {
+                canvas_draw_rframe(canvas, SPECIAL_X, y, SPECIAL_WIDTH, KEY_HEIGHT, 1);
+            }
             canvas_draw_str_aligned(
                 canvas,
                 SPECIAL_X + SPECIAL_WIDTH / 2,
-                y + 9,
+                y + KEY_HEIGHT / 2 + 1,
                 AlignCenter,
-                AlignBottom,
+                AlignCenter,
                 layer_labels[model->layer]);
-        } else {
-            // No ascenders, so sit one pixel higher to look centered
-            canvas_draw_str_aligned(
-                canvas, SPECIAL_X + SPECIAL_WIDTH / 2, y + 8, AlignCenter, AlignBottom, "save");
+            canvas_set_color(canvas, ColorBlack);
+            break;
+        default:
+            canvas_draw_xbm(
+                canvas,
+                SPECIAL_X,
+                y + (KEY_HEIGHT - KEY_ICON_SAVE_HEIGHT) / 2,
+                KEY_ICON_SAVE_WIDTH,
+                KEY_ICON_SAVE_HEIGHT,
+                selected ? key_icon_save_selected_bits : key_icon_save_bits);
+            break;
         }
-        canvas_set_color(canvas, ColorBlack);
     }
 }
 

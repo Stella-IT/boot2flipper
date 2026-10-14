@@ -1,6 +1,5 @@
 #include <gui/view.h>
 #include <gui/modules/variable_item_list.h>
-#include <gui/modules/number_input.h>
 #include "../../main.h"
 #include "main.h"
 
@@ -10,19 +9,18 @@
 // Forward declarations
 static void NetworkSettings_build_menu(App* app);
 static void NetworkSettings_enter_callback(void* context, uint32_t index);
-static void NetworkSettings_number_input_callback(void* context, int32_t number);
+static void NetworkSettings_ip_input_callback(void* context);
 
 AppNetworkSettings* NetworkSettings_alloc() {
     AppNetworkSettings* settings = (AppNetworkSettings*)malloc(sizeof(AppNetworkSettings));
     settings->var_item_list = variable_item_list_alloc();
-    settings->number_input = number_input_alloc();
+    settings->ip_input = ip_input_alloc();
 
     settings->ip_item = NULL;
     settings->subnet_item = NULL;
     settings->gateway_item = NULL;
     settings->dns_item = NULL;
 
-    settings->current_octet = 0;
     settings->editing_field = NETWORK_FIELD_IP;
     settings->current_view = NETWORK_VIEW_MAIN_LIST;
 
@@ -33,8 +31,8 @@ void NetworkSettings_free(void* ptr) {
     AppNetworkSettings* settings = (AppNetworkSettings*)ptr;
     if(settings == NULL) return;
 
-    if(settings->number_input != NULL) {
-        number_input_free(settings->number_input);
+    if(settings->ip_input != NULL) {
+        ip_input_free(settings->ip_input);
     }
 
     if(settings->var_item_list != NULL) {
@@ -51,8 +49,8 @@ View* NetworkSettings_get_view(void* ptr) {
     switch(settings->current_view) {
     case NETWORK_VIEW_MAIN_LIST:
         return variable_item_list_get_view(settings->var_item_list);
-    case NETWORK_VIEW_NUMBER_INPUT:
-        return number_input_get_view(settings->number_input);
+    case NETWORK_VIEW_IP_INPUT:
+        return ip_input_get_view(settings->ip_input);
     default:
         return variable_item_list_get_view(settings->var_item_list);
     }
@@ -101,63 +99,40 @@ static void NetworkSettings_build_menu(App* app) {
         settings->var_item_list, NetworkSettings_enter_callback, app);
 }
 
-static void NetworkSettings_number_input_callback(void* context, int32_t number) {
+static void NetworkSettings_ip_input_callback(void* context) {
     App* app = (App*)context;
     if(!app || !app->config) return;
 
     AppNetworkSettings* settings = app->allocated_scenes[THIS_SCENE];
     if(!settings) return;
 
-    settings->ip_octets[settings->current_octet] = (uint8_t)number;
-    settings->current_octet++;
+    FuriString* ip_string = furi_string_alloc_printf(
+        "%u.%u.%u.%u",
+        settings->ip_octets[0],
+        settings->ip_octets[1],
+        settings->ip_octets[2],
+        settings->ip_octets[3]);
 
-    if(settings->current_octet < 4) {
-        // Continue with next octet
-        FuriString* header =
-            furi_string_alloc_printf("Enter octet %d (0-255)", settings->current_octet + 1);
-        number_input_set_header_text(settings->number_input, furi_string_get_cstr(header));
-        number_input_set_result_callback(
-            settings->number_input,
-            NetworkSettings_number_input_callback,
-            app,
-            settings->ip_octets[settings->current_octet],
-            0,
-            255);
-
-        furi_string_free(header);
-
-        settings->current_view = NETWORK_VIEW_NUMBER_INPUT;
-        view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_NUMBER_INPUT);
-    } else {
-        // All octets entered
-        FuriString* ip_string = furi_string_alloc_printf(
-            "%d.%d.%d.%d",
-            settings->ip_octets[0],
-            settings->ip_octets[1],
-            settings->ip_octets[2],
-            settings->ip_octets[3]);
-
-        switch(settings->editing_field) {
-        case NETWORK_FIELD_IP:
-            furi_string_set(app->config->ip_addr, ip_string);
-            break;
-        case NETWORK_FIELD_SUBNET:
-            furi_string_set(app->config->subnet_mask, ip_string);
-            break;
-        case NETWORK_FIELD_GATEWAY:
-            furi_string_set(app->config->gateway, ip_string);
-            break;
-        case NETWORK_FIELD_DNS:
-            furi_string_set(app->config->dns, ip_string);
-            break;
-        }
-
-        furi_string_free(ip_string);
-
-        settings->current_view = NETWORK_VIEW_MAIN_LIST;
-        NetworkSettings_build_menu(app);
-        view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
+    switch(settings->editing_field) {
+    case NETWORK_FIELD_IP:
+        furi_string_set(app->config->ip_addr, ip_string);
+        break;
+    case NETWORK_FIELD_SUBNET:
+        furi_string_set(app->config->subnet_mask, ip_string);
+        break;
+    case NETWORK_FIELD_GATEWAY:
+        furi_string_set(app->config->gateway, ip_string);
+        break;
+    case NETWORK_FIELD_DNS:
+        furi_string_set(app->config->dns, ip_string);
+        break;
     }
+
+    furi_string_free(ip_string);
+
+    settings->current_view = NETWORK_VIEW_MAIN_LIST;
+    NetworkSettings_build_menu(app);
+    view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
 }
 
 static void NetworkSettings_enter_callback(void* context, uint32_t index) {
@@ -168,47 +143,50 @@ static void NetworkSettings_enter_callback(void* context, uint32_t index) {
     if(!settings) return;
 
     settings->editing_field = (NetworkFieldType)index;
-    settings->current_octet = 0;
 
     // Get the appropriate string
     FuriString* field_string = NULL;
+    const char* header = NULL;
     switch(index) {
     case NETWORK_FIELD_IP:
         field_string = app->config->ip_addr;
+        header = "Enter IP Address";
         break;
     case NETWORK_FIELD_SUBNET:
         field_string = app->config->subnet_mask;
+        header = "Enter Subnet Mask";
         break;
     case NETWORK_FIELD_GATEWAY:
         field_string = app->config->gateway;
+        header = "Enter Gateway";
         break;
     case NETWORK_FIELD_DNS:
         field_string = app->config->dns;
+        header = "Enter DNS Server";
         break;
     default:
         return;
     }
 
-    // Parse existing IP
-    int ip1, ip2, ip3, ip4;
-    if(sscanf(furi_string_get_cstr(field_string), "%d.%d.%d.%d", &ip1, &ip2, &ip3, &ip4) == 4) {
-        settings->ip_octets[0] = ip1;
-        settings->ip_octets[1] = ip2;
-        settings->ip_octets[2] = ip3;
-        settings->ip_octets[3] = ip4;
+    // Parse existing IP; start empty if it isn't a valid address
+    const char* current = furi_string_get_cstr(field_string);
+    unsigned ip[4];
+    bool valid = sscanf(current, "%u.%u.%u.%u", &ip[0], &ip[1], &ip[2], &ip[3]) == 4;
+    for(uint8_t i = 0; valid && i < 4; i++) {
+        if(ip[i] > 255) valid = false;
+    }
+    if(valid) {
+        for(uint8_t i = 0; i < 4; i++) {
+            settings->ip_octets[i] = ip[i];
+        }
     }
 
-    number_input_set_header_text(settings->number_input, "Enter octet 1 (0-255)");
-    number_input_set_result_callback(
-        settings->number_input,
-        NetworkSettings_number_input_callback,
-        app,
-        settings->ip_octets[settings->current_octet],
-        0,
-        255);
+    ip_input_set_header_text(settings->ip_input, header);
+    ip_input_set_result_callback(
+        settings->ip_input, NetworkSettings_ip_input_callback, app, settings->ip_octets, valid);
 
-    settings->current_view = NETWORK_VIEW_NUMBER_INPUT;
-    view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_NUMBER_INPUT);
+    settings->current_view = NETWORK_VIEW_IP_INPUT;
+    view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_IP_INPUT);
 }
 
 void NetworkSettings_on_enter(void* context) {
@@ -226,9 +204,7 @@ void NetworkSettings_on_enter(void* context) {
             NETWORK_VIEW_MAIN_LIST,
             variable_item_list_get_view(settings->var_item_list));
         view_dispatcher_add_view(
-            app->view_dispatcher,
-            NETWORK_VIEW_NUMBER_INPUT,
-            number_input_get_view(settings->number_input));
+            app->view_dispatcher, NETWORK_VIEW_IP_INPUT, ip_input_get_view(settings->ip_input));
         views_registered = true;
     }
 
@@ -246,8 +222,8 @@ bool NetworkSettings_on_event(void* context, SceneManagerEvent event) {
     if(!settings) return false;
 
     if(event.type == SceneManagerEventTypeBack) {
-        if(settings->current_view == NETWORK_VIEW_NUMBER_INPUT) {
-            // Return to main list from number input
+        if(settings->current_view == NETWORK_VIEW_IP_INPUT) {
+            // Return to main list from IP input
             settings->current_view = NETWORK_VIEW_MAIN_LIST;
             view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
             return true; // Consume the back event
