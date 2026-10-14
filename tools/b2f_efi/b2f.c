@@ -12,6 +12,14 @@
 // mode    What the Flipper shows: "status" or "framebuffer"
 // clear   Clears the status and frame and goes back to status mode
 //
+// Asking the Flipper's user:
+//   question <text>     Question shown above the options or keyboard
+//   options <a|b|c>     Options, or for text the default
+//   kbdtype <type>      Keyboard for text: "text", "ip" or "number"
+//   prompt <type>       Asks ("choice", "confirm" or "text") and waits for the answer.
+//                       It is put in the volatile EFI variable B2fAnswer for
+//                       ${efi/B2fAnswer:string}; fails if the user cancelled.
+//
 // The Flipper is found by the "B2F INFO" header at B2F_INFO_LBA on each disk,
 // and the file LBAs are read from it. Freestanding, no EFI library needed: see
 // build.sh.
@@ -29,6 +37,8 @@ typedef uint8_t BOOLEAN;
 #define EFI_SUCCESS           0
 #define EFI_ERROR_BIT         0x8000000000000000ULL
 #define EFI_INVALID_PARAMETER (EFI_ERROR_BIT | 2)
+#define EFI_UNSUPPORTED       (EFI_ERROR_BIT | 3)
+#define EFI_ABORTED           (EFI_ERROR_BIT | 21)
 #define EFI_NOT_FOUND         (EFI_ERROR_BIT | 14)
 #define EFI_ERROR(status)     (((status) & EFI_ERROR_BIT) != 0)
 
@@ -65,7 +75,9 @@ typedef struct {
     EFI_STATUS(EFIAPI* handle_protocol)(EFI_HANDLE handle, const EFI_GUID* protocol, void** iface);
     void *reserved, *register_protocol_notify, *locate_handle, *locate_device_path;
     void *install_configuration_table, *load_image, *start_image, *exit, *unload_image;
-    void *exit_boot_services, *get_next_monotonic_count, *stall, *set_watchdog_timer;
+    void *exit_boot_services, *get_next_monotonic_count;
+    EFI_STATUS(EFIAPI* stall)(uint64_t microseconds);
+    void* set_watchdog_timer;
     void *connect_controller, *disconnect_controller, *open_protocol, *close_protocol;
     void *open_protocol_information, *protocols_per_handle;
     EFI_STATUS(EFIAPI* locate_handle_buffer)
@@ -78,6 +90,18 @@ typedef struct {
 
 typedef struct {
     EFI_TABLE_HEADER hdr;
+    void *get_time, *set_time, *get_wakeup_time, *set_wakeup_time;
+    void *set_virtual_address_map, *convert_pointer, *get_variable, *get_next_variable_name;
+    EFI_STATUS(EFIAPI* set_variable)
+    (const CHAR16* name,
+     const EFI_GUID* vendor,
+     uint32_t attributes,
+     uint64_t size,
+     const void* data);
+} EFI_RUNTIME_SERVICES;
+
+typedef struct {
+    EFI_TABLE_HEADER hdr;
     CHAR16* firmware_vendor;
     uint32_t firmware_revision;
     EFI_HANDLE console_in_handle;
@@ -86,7 +110,7 @@ typedef struct {
     SIMPLE_TEXT_OUTPUT* con_out;
     EFI_HANDLE standard_error_handle;
     SIMPLE_TEXT_OUTPUT* std_err;
-    void* runtime_services;
+    EFI_RUNTIME_SERVICES* runtime_services;
     EFI_BOOT_SERVICES* boot_services;
 } EFI_SYSTEM_TABLE;
 
@@ -140,6 +164,11 @@ static const EFI_GUID block_io_guid =
     {0x964e5b21, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 static const EFI_GUID loaded_image_guid =
     {0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+// Vendor of the B2fAnswer variable (iPXE finds variables by name)
+static const EFI_GUID b2f_vendor_guid =
+    {0xb2f0f11f, 0xb007, 0x4f11, {0x9e, 0x2b, 0x0d, 0x1f, 0x11, 0x9e, 0x20, 0x26}};
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS 0x2
+
 static const EFI_GUID simple_file_system_guid =
     {0x964e5b22, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
 
@@ -194,6 +223,7 @@ static uint32_t get_u32(const uint8_t* p) {
 typedef struct {
     EFI_BLOCK_IO* block_io;
     uint32_t status_lba, frame_lba, mode_lba;
+    uint32_t type_lba, question_lba, options_lba, kbdtype_lba, answer_lba; // 0 if missing
 } B2fDisk;
 
 // Read the .B2F info header, true if the disk is a Flipper
@@ -213,6 +243,8 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
 
     disk->block_io = block_io;
     disk->status_lba = disk->frame_lba = disk->mode_lba = 0;
+    disk->type_lba = disk->question_lba = disk->options_lba = disk->kbdtype_lba = 0;
+    disk->answer_lba = 0;
     uint16_t count = sector[10] | sector[11] << 8;
     for(uint16_t i = 0; i < count && 16 + (i + 1) * 32 <= B2F_SECTOR_SIZE; i++) {
         const uint8_t* entry = sector + 16 + i * 32;
@@ -220,6 +252,11 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
         if(str_equal(name, "status")) disk->status_lba = get_u32(entry + 16);
         if(str_equal(name, "frame")) disk->frame_lba = get_u32(entry + 16);
         if(str_equal(name, "mode")) disk->mode_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/type")) disk->type_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/question")) disk->question_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/options")) disk->options_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/kbdtype")) disk->kbdtype_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/answer")) disk->answer_lba = get_u32(entry + 16);
     }
     return disk->status_lba != 0 && disk->frame_lba != 0 && disk->mode_lba != 0;
 }
@@ -287,6 +324,66 @@ static EFI_STATUS b2f_text(B2fDisk* disk, uint32_t lba, const char* text) {
     return b2f_disk_write(disk, lba, sector, B2F_SECTOR_SIZE);
 }
 
+// Options file (2 sectors), one option per line: "a|b|c" or "a\nb\nc"
+static EFI_STATUS b2f_options(B2fDisk* disk, const char* text) {
+    memset(frame, 0, sizeof(frame));
+    size_t length = 0;
+    while(*text && length < sizeof(frame) - 1) {
+        if(text[0] == '\\' && text[1] == 'n') {
+            frame[length++] = '\n';
+            text += 2;
+        } else {
+            frame[length++] = *text == '|' ? '\n' : (uint8_t)*text;
+            text++;
+        }
+    }
+    return b2f_disk_write(disk, disk->options_lba, frame, sizeof(frame));
+}
+
+static int starts_with(const uint8_t* text, const char* prefix) {
+    while(*prefix && *text == (uint8_t)*prefix) {
+        text++;
+        prefix++;
+    }
+    return *prefix == '\0';
+}
+
+// Ask the prompt and wait for the Flipper's user to answer it
+static EFI_STATUS b2f_prompt(B2fDisk* disk, const char* type) {
+    EFI_BLOCK_IO* block_io = disk->block_io;
+    EFI_STATUS status = b2f_text(disk, disk->type_lba, type);
+    if(!EFI_ERROR(status)) status = b2f_text(disk, disk->mode_lba, "prompt");
+    if(EFI_ERROR(status)) return status;
+
+    print("b2f: answer on the Flipper\n");
+    for(;;) {
+        status = block_io->read_blocks(
+            block_io, block_io->media->media_id, disk->answer_lba, B2F_SECTOR_SIZE, sector);
+        if(EFI_ERROR(status)) {
+            print("b2f: read failed\n");
+            return status;
+        }
+        if(starts_with(sector, "cancel\n")) {
+            print("b2f: cancelled\n");
+            return EFI_ABORTED;
+        }
+        if(starts_with(sector, "ok\n")) break;
+        st->boot_services->stall(100000);
+    }
+
+    // The answer is the line after "ok"
+    const uint8_t* value = sector + 3;
+    uint64_t size = 0;
+    while(size < B2F_SECTOR_SIZE - 3 && value[size] && value[size] != '\n')
+        size++;
+    status = st->runtime_services->set_variable(
+        u"B2fAnswer", &b2f_vendor_guid, EFI_VARIABLE_BOOTSERVICE_ACCESS, size, value);
+    // An empty answer deletes the variable, which reads as empty too
+    if(size == 0 && status == EFI_NOT_FOUND) status = EFI_SUCCESS;
+    if(EFI_ERROR(status)) print("b2f: cannot set B2fAnswer\n");
+    return status;
+}
+
 static EFI_STATUS b2f_frame(B2fDisk* disk, EFI_HANDLE device, const char* name) {
     CHAR16 path[128];
     size_t length = 0;
@@ -340,9 +437,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     cmdline[length] = '\0';
     const char* args = skip_word(cmdline);
 
-    if(!word_is(args, "status") && !word_is(args, "frame") && !word_is(args, "mode") &&
-       !word_is(args, "clear")) {
-        print("usage: b2f.efi status <text> | frame <file> | mode <mode> | clear\n");
+    // No table of names: pointers in data would need relocations
+    int known = word_is(args, "status") || word_is(args, "frame") || word_is(args, "mode") ||
+                word_is(args, "clear") || word_is(args, "question") || word_is(args, "options") ||
+                word_is(args, "kbdtype") || word_is(args, "prompt");
+    if(!known) {
+        print("usage: b2f.efi status <text> | frame <file> | mode <mode> | clear |\n"
+              "       question <text> | options <a|b|c> | kbdtype <type> | prompt <type>\n");
         return EFI_INVALID_PARAMETER;
     }
 
@@ -356,6 +457,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     if(word_is(args, "mode")) return b2f_text(&disk, disk.mode_lba, skip_word(args));
     if(word_is(args, "frame")) {
         return b2f_frame(&disk, loaded_image->device_handle, skip_word(args));
+    }
+
+    // Prompt, on a Flipper that has it
+    if(!word_is(args, "clear")) {
+        if(disk.type_lba == 0 || disk.question_lba == 0 || disk.options_lba == 0 ||
+           disk.kbdtype_lba == 0 || disk.answer_lba == 0) {
+            print("b2f: this Flipper has no prompt\n");
+            return EFI_UNSUPPORTED;
+        }
+        if(word_is(args, "question")) return b2f_text(&disk, disk.question_lba, skip_word(args));
+        if(word_is(args, "options")) return b2f_options(&disk, skip_word(args));
+        if(word_is(args, "kbdtype")) return b2f_text(&disk, disk.kbdtype_lba, skip_word(args));
+        return b2f_prompt(&disk, skip_word(args));
     }
 
     // clear

@@ -4,6 +4,11 @@
 #include <gui/view.h>
 #include <gui/view_dispatcher.h>
 #include <gui/modules/widget.h>
+#include <gui/modules/submenu.h>
+#include <gui/modules/number_input.h>
+#include "../../views/url_input.h"
+#include "../../views/ip_input.h"
+#include "../../views/confirm_input.h"
 #include "../../disk/virtual_fat.h"
 #include "../../b2f/b2f_dir.h"
 #include "../../usb/usb_scsi.h"
@@ -17,6 +22,17 @@ typedef enum {
     UsbMassStorageStateMissingFile,
     UsbMassStorageStateError,
 } UsbMassStorageState;
+
+// Views for prompts from the host (.B2F/prompt/)
+typedef enum {
+    USB_MASS_STORAGE_VIEW_PROMPT_CHOICE = 300,
+    USB_MASS_STORAGE_VIEW_PROMPT_TEXT = 301,
+    USB_MASS_STORAGE_VIEW_PROMPT_IP = 302,
+    USB_MASS_STORAGE_VIEW_PROMPT_NUMBER = 303,
+    USB_MASS_STORAGE_VIEW_PROMPT_CONFIRM = 304,
+} UsbMassStorageView;
+
+#define USB_MASS_STORAGE_PROMPT_TEXT_SIZE 128
 
 typedef struct {
     View* view;
@@ -40,6 +56,19 @@ typedef struct {
     FuriString* current_file;
     VirtualFat* vfat;
     B2fDir* b2f;
+
+    // Prompt from the host
+    Submenu* prompt_choice;
+    UrlInput* prompt_text;
+    IpInput* prompt_ip;
+    NumberInput* prompt_number;
+    ConfirmInput* prompt_confirm;
+    bool prompt_views_added;
+    uint32_t prompt_view; // Shown prompt view, 0 if none
+    B2fPrompt prompt;
+    char prompt_header[B2F_PROMPT_OPTION_LENGTH * 2]; // First line of the question
+    char prompt_text_buffer[USB_MASS_STORAGE_PROMPT_TEXT_SIZE];
+    uint8_t prompt_ip_buffer[4];
     UsbScsiContext* scsi;
     UsbMscContext* msc;
 } AppUsbMassStorage;

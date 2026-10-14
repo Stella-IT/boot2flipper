@@ -11,11 +11,15 @@
 static void append_b2f_setup(FuriString* script, bool bios_writer) {
     furi_string_cat_printf(
         script,
-        "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | mode <mode> | clear\n");
+        "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | mode <mode> | clear\n"
+        "# Ask the user: imgexec ${b2f} question <text>, options <a|b|c>, kbdtype <type>,\n"
+        "# then imgexec ${b2f} prompt <choice|confirm|text> && set answer ${${b2f_answer}}\n");
     furi_string_cat_printf(script, "set b2f file:/%s/unavailable\n", B2F_BIN_PATH);
+    furi_string_cat_printf(script, "set b2f_answer b2f_result\n");
     furi_string_cat_printf(
         script,
-        "iseq ${platform} efi && imgfetch --name b2f file:/%s && set b2f b2f || echo -n\n",
+        "iseq ${platform} efi && imgfetch --name b2f file:/%s && set b2f b2f && "
+        "set b2f_answer efi/B2fAnswer:string || echo -n\n",
         B2F_EFI_PATH);
     if(bios_writer) {
         furi_string_cat_printf(script, "iseq ${platform} pcbios && set b2f <INITRD> || echo -n\n");

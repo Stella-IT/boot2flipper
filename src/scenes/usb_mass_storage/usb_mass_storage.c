@@ -10,6 +10,10 @@
 
 #define THIS_SCENE UsbMassStorage
 
+#define EVENT_FILE_READ 0xFF
+#define EVENT_START     0x01
+#define EVENT_PROMPT    0x10 // The host asked a prompt
+
 #define STATUS_LINES       3
 #define STATUS_LINE_HEIGHT 10
 
@@ -144,7 +148,8 @@ static void file_read_callback(const char* filename, void* context) {
         furi_string_set_str(instance->current_file, filename);
         // Trigger view update
         if(instance->view) {
-            view_dispatcher_send_custom_event(((App*)instance->app)->view_dispatcher, 0xFF);
+            view_dispatcher_send_custom_event(
+                ((App*)instance->app)->view_dispatcher, EVENT_FILE_READ);
         }
     }
 }
@@ -172,8 +177,128 @@ static FuriString*
 // The host wrote to .B2F, called from the USB thread
 static void b2f_update_callback(void* context) {
     AppUsbMassStorage* instance = (AppUsbMassStorage*)context;
+    if(b2f_dir_get_mode(instance->b2f) == B2fModePrompt) {
+        // Views are switched on the GUI thread
+        view_dispatcher_send_custom_event(((App*)instance->app)->view_dispatcher, EVENT_PROMPT);
+        return;
+    }
     view_get_model(instance->view);
     view_commit_model(instance->view, true);
+}
+
+// Answer the shown prompt (NULL cancels) and go back to the main view
+static void usb_mass_storage_answer_prompt(AppUsbMassStorage* instance, const char* answer) {
+    if(instance->prompt_view == 0) return;
+    instance->prompt_view = 0;
+    if(instance->b2f) b2f_dir_answer_prompt(instance->b2f, answer);
+    view_dispatcher_switch_to_view(((App*)instance->app)->view_dispatcher, THIS_SCENE);
+}
+
+static void prompt_choice_callback(void* context, uint32_t index) {
+    AppUsbMassStorage* instance = context;
+    if(index < instance->prompt.option_count) {
+        usb_mass_storage_answer_prompt(instance, instance->prompt.options[index]);
+    }
+}
+
+static void prompt_confirm_callback(void* context, bool right) {
+    AppUsbMassStorage* instance = context;
+    usb_mass_storage_answer_prompt(instance, instance->prompt.options[right ? 0 : 1]);
+}
+
+static void prompt_text_callback(void* context) {
+    AppUsbMassStorage* instance = context;
+    usb_mass_storage_answer_prompt(instance, instance->prompt_text_buffer);
+}
+
+static void prompt_ip_callback(void* context) {
+    AppUsbMassStorage* instance = context;
+    const uint8_t* ip = instance->prompt_ip_buffer;
+    char text[16];
+    snprintf(text, sizeof(text), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    usb_mass_storage_answer_prompt(instance, text);
+}
+
+static void prompt_number_callback(void* context, int32_t number) {
+    AppUsbMassStorage* instance = context;
+    char text[16];
+    snprintf(text, sizeof(text), "%ld", number);
+    usb_mass_storage_answer_prompt(instance, text);
+}
+
+// Show the prompt the host asked, unless it is already shown
+static void usb_mass_storage_show_prompt(AppUsbMassStorage* instance) {
+    App* app = instance->app;
+    if(instance->state != UsbMassStorageStateActive || instance->b2f == NULL) return;
+
+    uint32_t shown_id = instance->prompt.id;
+    if(!b2f_dir_get_prompt(instance->b2f, &instance->prompt)) return;
+    if(instance->prompt_view != 0 && instance->prompt.id == shown_id) return;
+
+    B2fPrompt* prompt = &instance->prompt;
+    const char* default_value = prompt->option_count > 0 ? prompt->options[0] : "";
+
+    // Lists and keyboards have a one line header
+    size_t header_length = strcspn(prompt->question, "\n");
+    if(header_length >= sizeof(instance->prompt_header)) {
+        header_length = sizeof(instance->prompt_header) - 1;
+    }
+    memcpy(instance->prompt_header, prompt->question, header_length);
+    instance->prompt_header[header_length] = '\0';
+    const char* header = instance->prompt_header;
+
+    if(prompt->type == B2fPromptConfirm) {
+        confirm_input_set(
+            instance->prompt_confirm,
+            prompt->question,
+            prompt->option_count > 1 ? prompt->options[1] : NULL,
+            prompt->options[0]);
+        confirm_input_set_callback(instance->prompt_confirm, prompt_confirm_callback, instance);
+        instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_CONFIRM;
+    } else if(prompt->type == B2fPromptChoice) {
+        submenu_reset(instance->prompt_choice);
+        submenu_set_header(instance->prompt_choice, header);
+        for(uint8_t i = 0; i < prompt->option_count; i++) {
+            submenu_add_item(
+                instance->prompt_choice, prompt->options[i], i, prompt_choice_callback, instance);
+        }
+        instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_CHOICE;
+    } else if(prompt->keyboard == B2fKeyboardIp) {
+        unsigned int octets[4];
+        bool prefill =
+            sscanf(default_value, "%u.%u.%u.%u", &octets[0], &octets[1], &octets[2], &octets[3]) ==
+                4 &&
+            octets[0] <= 255 && octets[1] <= 255 && octets[2] <= 255 && octets[3] <= 255;
+        for(uint8_t i = 0; i < 4; i++) {
+            instance->prompt_ip_buffer[i] = prefill ? octets[i] : 0;
+        }
+        ip_input_set_header_text(instance->prompt_ip, header);
+        ip_input_set_result_callback(
+            instance->prompt_ip, prompt_ip_callback, instance, instance->prompt_ip_buffer, prefill);
+        instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_IP;
+    } else if(prompt->keyboard == B2fKeyboardNumber) {
+        number_input_set_header_text(instance->prompt_number, header);
+        number_input_set_result_callback(
+            instance->prompt_number,
+            prompt_number_callback,
+            instance,
+            atoi(default_value),
+            -999999999,
+            999999999);
+        instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_NUMBER;
+    } else {
+        strlcpy(instance->prompt_text_buffer, default_value, sizeof(instance->prompt_text_buffer));
+        url_input_set_header_text(instance->prompt_text, header);
+        url_input_set_result_callback(
+            instance->prompt_text,
+            prompt_text_callback,
+            instance,
+            instance->prompt_text_buffer,
+            sizeof(instance->prompt_text_buffer));
+        instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_TEXT;
+    }
+
+    view_dispatcher_switch_to_view(app->view_dispatcher, instance->prompt_view);
 }
 
 static bool usb_mass_storage_input_callback(InputEvent* event, void* context) {
@@ -188,7 +313,7 @@ static bool usb_mass_storage_input_callback(InputEvent* event, void* context) {
     if(event->type == InputTypeShort && event->key == InputKeyOk) {
         if(instance->state == UsbMassStorageStateIdle) {
             // Send custom event to scene manager to handle state change
-            view_dispatcher_send_custom_event(app->view_dispatcher, 0x01);
+            view_dispatcher_send_custom_event(app->view_dispatcher, EVENT_START);
             return true;
         }
     }
@@ -217,6 +342,15 @@ AppUsbMassStorage* UsbMassStorage_alloc() {
     instance->b2f = NULL;
     instance->scsi = NULL;
     instance->msc = NULL;
+
+    instance->prompt_choice = submenu_alloc();
+    instance->prompt_text = url_input_alloc();
+    instance->prompt_ip = ip_input_alloc();
+    instance->prompt_number = number_input_alloc();
+    instance->prompt_confirm = confirm_input_alloc();
+    instance->prompt_views_added = false;
+    instance->prompt_view = 0;
+    memset(&instance->prompt, 0, sizeof(instance->prompt));
 
     instance->ip_addr = furi_string_alloc();
     instance->subnet_mask = furi_string_alloc();
@@ -250,6 +384,21 @@ void UsbMassStorage_free(void* ptr) {
     }
 
     b2f_dir_free(instance->b2f);
+
+    // The prompt views are removed before they are freed
+    if(instance->prompt_views_added) {
+        ViewDispatcher* view_dispatcher = ((App*)instance->app)->view_dispatcher;
+        view_dispatcher_remove_view(view_dispatcher, USB_MASS_STORAGE_VIEW_PROMPT_CHOICE);
+        view_dispatcher_remove_view(view_dispatcher, USB_MASS_STORAGE_VIEW_PROMPT_TEXT);
+        view_dispatcher_remove_view(view_dispatcher, USB_MASS_STORAGE_VIEW_PROMPT_IP);
+        view_dispatcher_remove_view(view_dispatcher, USB_MASS_STORAGE_VIEW_PROMPT_NUMBER);
+        view_dispatcher_remove_view(view_dispatcher, USB_MASS_STORAGE_VIEW_PROMPT_CONFIRM);
+    }
+    submenu_free(instance->prompt_choice);
+    url_input_free(instance->prompt_text);
+    ip_input_free(instance->prompt_ip);
+    number_input_free(instance->prompt_number);
+    confirm_input_free(instance->prompt_confirm);
 
     furi_string_free(instance->ip_addr);
     furi_string_free(instance->subnet_mask);
@@ -304,7 +453,32 @@ void UsbMassStorage_on_enter(void* context) {
 
     instance->app = app;
     instance->state = UsbMassStorageStateIdle;
+    instance->prompt_view = 0;
     furi_string_reset(instance->current_file);
+
+    if(!instance->prompt_views_added) {
+        view_dispatcher_add_view(
+            app->view_dispatcher,
+            USB_MASS_STORAGE_VIEW_PROMPT_CHOICE,
+            submenu_get_view(instance->prompt_choice));
+        view_dispatcher_add_view(
+            app->view_dispatcher,
+            USB_MASS_STORAGE_VIEW_PROMPT_TEXT,
+            url_input_get_view(instance->prompt_text));
+        view_dispatcher_add_view(
+            app->view_dispatcher,
+            USB_MASS_STORAGE_VIEW_PROMPT_IP,
+            ip_input_get_view(instance->prompt_ip));
+        view_dispatcher_add_view(
+            app->view_dispatcher,
+            USB_MASS_STORAGE_VIEW_PROMPT_NUMBER,
+            number_input_get_view(instance->prompt_number));
+        view_dispatcher_add_view(
+            app->view_dispatcher,
+            USB_MASS_STORAGE_VIEW_PROMPT_CONFIRM,
+            confirm_input_get_view(instance->prompt_confirm));
+        instance->prompt_views_added = true;
+    }
 
     view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
 }
@@ -314,11 +488,14 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
     AppUsbMassStorage* instance = app->allocated_scenes[THIS_SCENE];
 
     if(event.type == SceneManagerEventTypeCustom) {
-        if(event.event == 0xFF) { // File read notification
+        if(event.event == EVENT_PROMPT) {
+            usb_mass_storage_show_prompt(instance);
+            return true;
+        } else if(event.event == EVENT_FILE_READ) {
             // Just trigger view redraw
             view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
             return true;
-        } else if(event.event == 0x01) { // OK button pressed
+        } else if(event.event == EVENT_START) { // OK button pressed
             instance->state = UsbMassStorageStateStarting;
             view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
 
@@ -473,6 +650,12 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
             return true;
         }
     } else if(event.type == SceneManagerEventTypeBack) {
+        // Back on a prompt cancels it, USB keeps running
+        if(instance->prompt_view != 0) {
+            usb_mass_storage_answer_prompt(instance, NULL);
+            return true;
+        }
+
         if(instance->state == UsbMassStorageStateActive) {
             // Stop USB MSC
             instance->state = UsbMassStorageStateStopping;

@@ -8,7 +8,7 @@
 #include "../log.h"
 
 #define TAG           "VirtualFAT"
-#define MAX_FILES     16
+#define MAX_FILES     32
 #define SD_CACHE_SIZE 4096 // SD read-ahead size, multiple of SECTOR_SIZE
 
 #define FAT_ENTRY_BAD 0x0FFFFFF7

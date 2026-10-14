@@ -46,7 +46,12 @@ The root directory is at LBA 0x2000, and 0x2001-0x20FF is reserved for a hidden 
 | `.B2F/info` | 0x2002 | 512 bytes | Read-only header, starts with the magic `B2F INFO` (see below) |
 | `.B2F/status` | 0x2003 | 512 bytes | ASCII text shown in `status` mode, up to the first NUL (3 lines) |
 | `.B2F/frame` | 0x2004 | 1024 bytes | 128x64 1-bit image shown full screen in `framebuffer` mode. Rows of 16 bytes, least significant bit is the leftmost pixel (XBM), 1 is black |
-| `.B2F/mode` | 0x2006 | 512 bytes | What the Flipper shows, an ASCII word: `status` (default, also for unknown words) or `framebuffer` |
+| `.B2F/mode` | 0x2006 | 512 bytes | What the Flipper shows, an ASCII word: `status` (default, also for unknown words), `framebuffer` or `prompt` (asks `.B2F/prompt/`, the Flipper writes `status` back once answered) |
+| `.B2F/prompt/type` | 0x2011 | 512 bytes | `choice` (a list, the default), `confirm` (two buttons) or `text` |
+| `.B2F/prompt/question` | 0x2012 | 512 bytes | The question. Lists and keyboards show its first line |
+| `.B2F/prompt/options` | 0x2013 | 1024 bytes | One per line. Confirm: the positive (OK key) then the negative (Back key) button, Yes/No if none, only OK if one. Text: the default. A choice without options is a Yes/No confirm |
+| `.B2F/prompt/kbdtype` | 0x2015 | 512 bytes | Keyboard for `text`: `text` (default), `ip` or `number` |
+| `.B2F/prompt/answer` | 0x2016 | 512 bytes | Read-only. `pending\n` while asking, then `ok\n<value>\n` (the option or text) or `cancel\n` (Back on the Flipper, except on a confirm with a Back button) |
 
 The LBAs are the same for every boot method. To find the disk (or the area, if the layout ever changes), look for the magic in `info`. Its layout, little-endian:
 
@@ -57,7 +62,8 @@ The LBAs are the same for every boot method. To find the disk (or the area, if t
 | 10 | 2 | Entry count |
 | 16 | 32 each | Entry: name (16, NUL padded), LBA (4), size in bytes (4), flags (4, bit 0 = writable), reserved (4) |
 
-Write the frame's 2 sectors in one command, so it isn't shown half updated. 0x2007-0x201F is kept for more files (e.g. a prompt), the writers are in `.B2F/bin` from 0x2020.  
+Write the frame's 2 sectors in one command, so it isn't shown half updated. The writers are in `.B2F/bin` from 0x2020, the sectors before it are kept for more files.  
+To ask the user without the writers: write the prompt files, write `prompt` to the mode, then read the answer sector until it is not `pending` (raw reads, so no cache gets in the way).  
 Other writes don't change the disk: the free space is marked as bad clusters, so operating systems see a full disk and can't add files, and writes outside `.B2F` are dropped.
 
 #### From iPXE
@@ -68,6 +74,23 @@ imgexec ${b2f} status Downloading kernel...\nPlease wait
 imgexec ${b2f} frame logo.bin
 imgexec ${b2f} mode framebuffer
 imgexec ${b2f} clear
+```
+
+To ask the Flipper's user, fill in the prompt and run `prompt`, which waits for the answer and fails if the user pressed Back. `${${b2f_answer}}` is the answer (the generated script points `${b2f_answer}` at where the writer left it):
+
+```
+imgexec ${b2f} question Which OS?
+imgexec ${b2f} options Ubuntu|Debian|Windows
+imgexec ${b2f} prompt choice && set os ${${b2f_answer}} || goto cancelled
+
+imgexec ${b2f} question Server IP
+imgexec ${b2f} options 192.168.0.10
+imgexec ${b2f} kbdtype ip
+imgexec ${b2f} prompt text && set server ${${b2f_answer}} || goto cancelled
+
+imgexec ${b2f} question Reinstall the OS?\nAll data will be erased.
+imgexec ${b2f} options Erase|Keep
+imgexec ${b2f} prompt confirm && set choice ${${b2f_answer}} || goto cancelled
 ```
 
 `\n` starts a new line. `clear` empties the status and frame and goes back to `status` mode. For `frame`, UEFI reads an image fetched with `imgfetch http://server/logo.bin logo.bin`, BIOS opens the given URI (e.g. `http://server/logo.bin`).

@@ -109,7 +109,7 @@ typedef enum {
  */
 typedef struct {
     char name[11]; // 8.3 filename (padded with spaces)
-    char long_name[256]; // VFAT long filename (null-terminated UTF-8)
+    char long_name[64]; // VFAT long filename (null-terminated ASCII), longer names are cut
     uint32_t size; // File size in bytes
     uint32_t start_cluster; // Starting cluster number
     FileSourceType source_type; // Where data comes from

@@ -9,6 +9,16 @@
  *   imgexec <INITRD> mode framebuffer
  *   imgexec <INITRD> clear
  *
+ * and to ask the Flipper's user (see .B2F/prompt/ in src/b2f/b2f_dir.h):
+ *
+ *   imgexec <INITRD> question Which OS?
+ *   imgexec <INITRD> options Ubuntu|Debian|Windows
+ *   imgexec <INITRD> kbdtype ip
+ *   imgexec <INITRD> prompt choice
+ *
+ * prompt waits for the answer and sets the iPXE setting b2f_result to it with
+ * PXENV_FILE_EXEC; it fails if the user cancelled.
+ *
  * The arguments come from iPXE's PXENV_FILE_CMDLINE, the frame is read with
  * PXENV_FILE_OPEN/READ (any URI iPXE can open). The Flipper is found by the
  * "B2F INFO" header at B2F_INFO_LBA, read with INT 13h extensions, and the
@@ -27,6 +37,7 @@
 	.set	PXENV_FILE_OPEN, 0x00e0
 	.set	PXENV_FILE_CLOSE, 0x00e1
 	.set	PXENV_FILE_READ, 0x00e3
+	.set	PXENV_FILE_EXEC, 0x00e5
 	.set	PXENV_FILE_CMDLINE, 0x00e8
 
 /* iPXE calls the NBP at 0000:7c00 with ES:BX pointing to PXENV+ */
@@ -96,23 +107,40 @@ fail:
 /* Handlers: %si = argument, return %ax = exit code */
 cmd_status:
 	movl	status_lba, %eax
-	jmp	write_text
+	jmp	write_line_file
 
 cmd_mode:
 	movl	mode_lba, %eax
+	jmp	write_line_file
+
+/* Write the text at %si to the 1 sector file at %eax */
+write_line_file:
+	movw	$1, %dx
+	movb	$0, pipe_newline
 	jmp	write_text
 
-/* Write the text at %si to the 1 sector file at %eax, "\n" starts a new line */
+/* Write the text at %si to the file at %eax of %dx sectors (1 or 2). "\n"
+ * starts a new line, and so does '|' if pipe_newline is set. */
 write_text:
 	pushl	%eax
-	movw	$sector, %di
+	movw	$frame, %di
 	call	zero_sector
-	movw	$sector, %di
-	movw	$511, %cx		/* keep a NUL at the end */
+	movw	$frame + 512, %di
+	call	zero_sector
+	movw	%dx, %cx
+	shlw	$9, %cx
+	decw	%cx			/* keep a NUL at the end */
+	movw	$frame, %di
 1:	lodsb
 	testb	%al, %al
 	jz	3f
-	cmpb	$'\\', %al		/* "\n" starts a new line */
+	cmpb	$'|', %al
+	jne	4f
+	cmpb	$0, pipe_newline
+	je	2f
+	movb	$'\n', %al
+	jmp	2f
+4:	cmpb	$'\\', %al		/* "\n" starts a new line */
 	jne	2f
 	cmpb	$'n', (%si)
 	jne	2f
@@ -121,8 +149,8 @@ write_text:
 2:	stosb
 	loop	1b
 3:	popl	%eax
-	movw	$1, %cx
-	movw	$sector, %bx
+	movw	%dx, %cx
+	movw	$frame, %bx
 	jmp	write_sectors
 
 cmd_clear:
@@ -138,12 +166,12 @@ cmd_clear:
 	jnz	1f
 	movw	$empty, %si
 	movl	status_lba, %eax
-	call	write_text
+	call	write_line_file
 	testw	%ax, %ax
 	jnz	1f
 	movw	$name_status, %si	/* back to status mode */
 	movl	mode_lba, %eax
-	call	write_text
+	call	write_line_file
 1:	ret
 
 cmd_frame:
@@ -201,6 +229,129 @@ frame_open_error:
 frame_size_error:
 	movw	$msg_size, %si
 	jmp	fail
+
+/* Prompt files, on a Flipper that has them */
+cmd_question:
+	movl	question_lba, %eax
+	jmp	write_prompt_line
+cmd_kbdtype:
+	movl	kbdtype_lba, %eax
+	jmp	write_prompt_line
+cmd_options:
+	call	check_prompt
+	jc	no_prompt
+	movl	options_lba, %eax
+	movw	$2, %dx
+	movb	$1, pipe_newline
+	jmp	write_text
+write_prompt_line:
+	call	check_prompt
+	jc	no_prompt
+	jmp	write_line_file
+no_prompt:
+	movw	$msg_no_prompt, %si
+	jmp	fail
+
+/* CF set if the Flipper has no prompt files */
+check_prompt:
+	pushw	%si
+	movw	$type_lba, %si
+1:	cmpl	$0, (%si)
+	je	2f
+	addw	$4, %si
+	cmpw	$info_lbas_end, %si
+	jb	1b
+	popw	%si
+	clc
+	ret
+2:	popw	%si
+	stc
+	ret
+
+/* Ask the prompt of type %si and wait for the answer */
+cmd_prompt:
+	call	check_prompt
+	jc	no_prompt
+	movl	type_lba, %eax
+	call	write_line_file
+	testw	%ax, %ax
+	jnz	9f
+	movw	$name_prompt, %si
+	movl	mode_lba, %eax
+	call	write_line_file
+	testw	%ax, %ax
+	jnz	9f
+	movw	$msg_waiting, %si
+	call	print
+
+1:	movl	answer_lba, %eax
+	movw	$1, %cx
+	movw	$sector, %bx
+	movb	$0x42, %dh
+	call	disk_io
+	jc	prompt_read_error
+	movw	$sector, %si
+	movw	$answer_ok, %di
+	call	starts_with
+	je	2f
+	movw	$sector, %si
+	movw	$answer_cancel, %di
+	call	starts_with
+	je	prompt_cancelled
+	movb	$0x86, %ah		/* wait 100ms */
+	movw	$0x0001, %cx
+	movw	$0x86a0, %dx
+	int	$0x15
+	jmp	1b
+
+	/* "set b2f_result <the line after ok>" */
+2:	movw	$set_result, %si
+	movw	$cmdline, %di
+3:	lodsb
+	testb	%al, %al
+	jz	4f
+	stosb
+	jmp	3b
+4:	movw	$sector + 3, %si
+	movw	$cmdline + 255, %cx
+	subw	%di, %cx
+5:	lodsb
+	cmpb	$'\n', %al
+	je	6f
+	testb	%al, %al
+	jz	6f
+	stosb
+	loop	5b
+6:	movb	$0, (%di)
+	movw	$exec_params, %di
+	movw	$PXENV_FILE_EXEC, %bx
+	call	pxe_call
+	testw	%ax, %ax
+	jnz	prompt_exec_error
+	xorw	%ax, %ax
+9:	ret
+
+prompt_read_error:
+	movw	$msg_read, %si
+	jmp	fail
+prompt_cancelled:
+	movw	$msg_cancelled, %si
+	jmp	fail
+prompt_exec_error:
+	movw	$msg_exec, %si
+	jmp	fail
+
+/* ZF set if the text at %si starts with the NUL terminated text at %di */
+starts_with:
+1:	movb	(%di), %al
+	testb	%al, %al
+	jz	2f
+	cmpb	(%si), %al
+	jne	2f
+	incw	%si
+	incw	%di
+	jmp	1b
+2:	ret
 
 /* Find the command word at %si: CF clear and %ax = handler if found */
 find_command:
@@ -275,46 +426,44 @@ find_disk:
 4:	popw	%si
 	ret
 
-/* Read status_lba and frame_lba from the info header in sector */
+/* Read the file LBAs from the info header in sector. CF set if status,
+ * frame or mode is missing; the prompt LBAs are 0 if missing. */
 parse_info:
-	movl	$0, status_lba
-	movl	$0, frame_lba
-	movl	$0, mode_lba
+	movw	$status_lba, %di
+	movw	$(info_lbas_end - status_lba) / 2, %cx
+	xorw	%ax, %ax
+	rep	stosw
 	movw	sector + 10, %cx	/* entry count */
 	movw	$sector + 16, %bx
 1:	jcxz	3f
 	cmpw	$sector + 512, %bx
 	jae	3f
+	movw	$info_fields, field
+2:	movw	field, %si
+	movw	(%si), %di		/* field name */
+	testw	%di, %di
+	jz	4f
+	movw	2(%si), %dx		/* its LBA variable */
 	movw	%bx, %si
-	movw	$name_status, %di
 	call	name_equal
-	jne	2f
+	jne	5f
 	movl	16(%bx), %eax
-	movl	%eax, status_lba
-2:	movw	%bx, %si
-	movw	$name_frame, %di
-	call	name_equal
-	jne	2f
-	movl	16(%bx), %eax
-	movl	%eax, frame_lba
-2:	movw	%bx, %si
-	movw	$name_mode, %di
-	call	name_equal
-	jne	2f
-	movl	16(%bx), %eax
-	movl	%eax, mode_lba
-2:	addw	$32, %bx
+	movw	%dx, %si
+	movl	%eax, (%si)
+5:	addw	$4, field
+	jmp	2b
+4:	addw	$32, %bx
 	decw	%cx
 	jmp	1b
 3:	cmpl	$0, status_lba
-	je	4f
+	je	6f
 	cmpl	$0, frame_lba
-	je	4f
+	je	6f
 	cmpl	$0, mode_lba
-	je	4f
+	je	6f
 	clc
 	ret
-4:	stc
+6:	stc
 	ret
 
 /* ZF set if the NUL terminated names at %si and %di match */
@@ -415,6 +564,22 @@ commands:
 	.word	name_frame, cmd_frame
 	.word	name_mode, cmd_mode
 	.word	name_clear, cmd_clear
+	.word	name_question, cmd_question
+	.word	name_options, cmd_options
+	.word	name_kbdtype, cmd_kbdtype
+	.word	name_prompt, cmd_prompt
+	.word	0
+
+/* Info header entries and where their LBA goes */
+info_fields:
+	.word	name_status, status_lba
+	.word	name_frame, frame_lba
+	.word	name_mode, mode_lba
+	.word	name_info_type, type_lba
+	.word	name_info_question, question_lba
+	.word	name_info_options, options_lba
+	.word	name_info_kbdtype, kbdtype_lba
+	.word	name_info_answer, answer_lba
 	.word	0
 
 magic:
@@ -427,10 +592,45 @@ name_mode:
 	.asciz	"mode"
 name_clear:
 	.asciz	"clear"
+name_question:
+	.asciz	"question"
+name_options:
+	.asciz	"options"
+name_kbdtype:
+	.asciz	"kbdtype"
+name_prompt:
+	.asciz	"prompt"
+name_info_type:
+	.asciz	"prompt/type"
+name_info_question:
+	.asciz	"prompt/question"
+name_info_options:
+	.asciz	"prompt/options"
+name_info_kbdtype:
+	.asciz	"prompt/kbdtype"
+name_info_answer:
+	.asciz	"prompt/answer"
+answer_ok:
+	.asciz	"ok\n"
+answer_cancel:
+	.asciz	"cancel\n"
+set_result:
+	.asciz	"set b2f_result "
 empty:
 	.byte	0
 msg_usage:
-	.asciz	"usage: b2f.pxe status <text> | frame <uri> | mode <mode> | clear\n"
+	.ascii	"usage: b2f.pxe status <text> | frame <uri> | mode <mode> | clear |\n"
+	.asciz	"       question <text> | options <a|b|c> | kbdtype <type> | prompt <type>\n"
+msg_no_prompt:
+	.asciz	"b2f: this Flipper has no prompt\n"
+msg_waiting:
+	.asciz	"b2f: answer on the Flipper\n"
+msg_cancelled:
+	.asciz	"b2f: cancelled\n"
+msg_read:
+	.asciz	"b2f: read failed\n"
+msg_exec:
+	.asciz	"b2f: cannot set b2f_result\n"
 msg_no_disk:
 	.asciz	"b2f: Flipper disk not found\n"
 msg_open:
@@ -454,6 +654,26 @@ frame_lba:
 	.long	0
 mode_lba:
 	.long	0
+type_lba:
+	.long	0
+question_lba:
+	.long	0
+options_lba:
+	.long	0
+kbdtype_lba:
+	.long	0
+answer_lba:
+	.long	0
+info_lbas_end:
+field:
+	.word	0
+pipe_newline:
+	.byte	0
+	.balign	2
+
+exec_params:
+	.word	0			/* Status */
+	.word	cmdline, 0		/* Command */
 
 dap:
 	.byte	0x10, 0
