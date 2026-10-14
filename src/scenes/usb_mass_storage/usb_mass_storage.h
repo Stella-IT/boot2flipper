@@ -5,7 +5,6 @@
 #include <gui/view_dispatcher.h>
 #include <gui/modules/widget.h>
 #include <gui/modules/submenu.h>
-#include <gui/modules/number_input.h>
 #include "../../views/url_input.h"
 #include "../../views/ip_input.h"
 #include "../../views/confirm_input.h"
@@ -28,7 +27,6 @@ typedef enum {
     USB_MASS_STORAGE_VIEW_PROMPT_CHOICE = 300,
     USB_MASS_STORAGE_VIEW_PROMPT_TEXT = 301,
     USB_MASS_STORAGE_VIEW_PROMPT_IP = 302,
-    USB_MASS_STORAGE_VIEW_PROMPT_NUMBER = 303,
     USB_MASS_STORAGE_VIEW_PROMPT_CONFIRM = 304,
 } UsbMassStorageView;
 
@@ -61,12 +59,15 @@ typedef struct {
     Submenu* prompt_choice;
     UrlInput* prompt_text;
     IpInput* prompt_ip;
-    NumberInput* prompt_number;
     ConfirmInput* prompt_confirm;
     bool prompt_views_added;
     uint32_t prompt_view; // Shown prompt view, 0 if none
     B2fPrompt prompt;
-    char prompt_header[B2F_PROMPT_OPTION_LENGTH * 2]; // First line of the question
+    char prompt_title[B2F_PROMPT_OPTION_LENGTH * 2]; // First line of the question
+    char prompt_header[B2F_PROMPT_OPTION_LENGTH * 2 + 16]; // Title and " (seconds)"
+    uint32_t prompt_deadline; // Tick of the timeout, if the prompt has one
+    int32_t prompt_seconds; // Countdown shown, -1 before the first update
+    bool prompt_touched; // The user pressed a key, the timeout no longer runs
     char prompt_text_buffer[USB_MASS_STORAGE_PROMPT_TEXT_SIZE];
     uint8_t prompt_ip_buffer[4];
     UsbScsiContext* scsi;

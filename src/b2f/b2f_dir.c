@@ -8,6 +8,7 @@
 #define B2F_ANSWER_PENDING "pending\n"
 #define B2F_ANSWER_OK      "ok\n"
 #define B2F_ANSWER_CANCEL  "cancel\n"
+#define B2F_ANSWER_TIMEOUT "timeout\n"
 
 typedef struct {
     B2fDir* b2f;
@@ -32,6 +33,7 @@ struct B2fDir {
     uint8_t question[B2F_QUESTION_SIZE];
     uint8_t options[B2F_OPTIONS_SIZE];
     uint8_t kbdtype[B2F_PROMPT_FILES_SIZE];
+    uint8_t timeout[B2F_PROMPT_FILES_SIZE];
     uint8_t answer[B2F_PROMPT_FILES_SIZE]; // Written by the Flipper, read by the USB thread
 
     B2fMode mode;
@@ -165,6 +167,14 @@ static void b2f_dir_parse_prompt(B2fDir* b2f) {
         prompt->keyboard = B2fKeyboardText;
     }
 
+    // Seconds, up to B2F_PROMPT_TIMEOUT_MAX
+    for(size_t i = 0;
+        i < B2F_PROMPT_FILES_SIZE && b2f->timeout[i] >= '0' && b2f->timeout[i] <= '9';
+        i++) {
+        prompt->timeout = prompt->timeout * 10 + (b2f->timeout[i] - '0');
+        if(prompt->timeout > B2F_PROMPT_TIMEOUT_MAX) prompt->timeout = B2F_PROMPT_TIMEOUT_MAX;
+    }
+
     // The whole question, lines kept
     size_t length = 0;
     for(size_t i = 0; i < B2F_QUESTION_SIZE && b2f->question[i] != '\0'; i++) {
@@ -277,6 +287,12 @@ bool b2f_dir_add_to(B2fDir* b2f, VirtualFat* vfat) {
          B2F_PROMPT_FILES_SIZE,
          &b2f->prompt_file},
         {B2F_PROMPT_PATH, "answer", B2F_ANSWER_LBA, b2f->answer, B2F_PROMPT_FILES_SIZE, NULL},
+        {B2F_PROMPT_PATH,
+         "timeout",
+         B2F_TIMEOUT_LBA,
+         b2f->timeout,
+         B2F_PROMPT_FILES_SIZE,
+         &b2f->prompt_file},
     };
 
     // The header lists every file
@@ -383,12 +399,14 @@ bool b2f_dir_get_prompt(B2fDir* b2f, B2fPrompt* prompt) {
     return waiting;
 }
 
-void b2f_dir_answer_prompt(B2fDir* b2f, const char* answer) {
+void b2f_dir_answer_prompt(B2fDir* b2f, B2fAnswer result, const char* value) {
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
     if(b2f->prompt_waiting) {
         b2f->prompt_waiting = false;
-        if(answer) {
-            b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_OK, answer);
+        if(result == B2fAnswerOk) {
+            b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_OK, value);
+        } else if(result == B2fAnswerTimeout) {
+            b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_TIMEOUT, NULL);
         } else {
             b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_CANCEL, NULL);
         }

@@ -16,9 +16,12 @@
 //   question <text>     Question shown above the options or keyboard
 //   options <a|b|c>     Options, or for text the default
 //   kbdtype <type>      Keyboard for text: "text", "ip" or "number"
+//   timeout <seconds>   Time to answer if the Flipper is not touched (0: none)
 //   prompt <type>       Asks ("choice", "confirm" or "text") and waits for the answer.
 //                       It is put in the volatile EFI variable B2fAnswer for
-//                       ${efi/B2fAnswer:string}; fails if the user cancelled.
+//                       ${efi/B2fAnswer:string}. If the user cancelled or the
+//                       time ran out, B2fAnswer is "cancel" or "timeout" and
+//                       prompt fails.
 //
 // The Flipper is found by the "B2F INFO" header at B2F_INFO_LBA on each disk,
 // and the file LBAs are read from it. Freestanding, no EFI library needed: see
@@ -38,6 +41,7 @@ typedef uint8_t BOOLEAN;
 #define EFI_ERROR_BIT         0x8000000000000000ULL
 #define EFI_INVALID_PARAMETER (EFI_ERROR_BIT | 2)
 #define EFI_UNSUPPORTED       (EFI_ERROR_BIT | 3)
+#define EFI_TIMEOUT           (EFI_ERROR_BIT | 18)
 #define EFI_ABORTED           (EFI_ERROR_BIT | 21)
 #define EFI_NOT_FOUND         (EFI_ERROR_BIT | 14)
 #define EFI_ERROR(status)     (((status) & EFI_ERROR_BIT) != 0)
@@ -224,6 +228,7 @@ typedef struct {
     EFI_BLOCK_IO* block_io;
     uint32_t status_lba, frame_lba, mode_lba;
     uint32_t type_lba, question_lba, options_lba, kbdtype_lba, answer_lba; // 0 if missing
+    uint32_t timeout_lba; // 0 on Flippers without prompt timeouts
 } B2fDisk;
 
 // Read the .B2F info header, true if the disk is a Flipper
@@ -244,7 +249,7 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
     disk->block_io = block_io;
     disk->status_lba = disk->frame_lba = disk->mode_lba = 0;
     disk->type_lba = disk->question_lba = disk->options_lba = disk->kbdtype_lba = 0;
-    disk->answer_lba = 0;
+    disk->answer_lba = disk->timeout_lba = 0;
     uint16_t count = sector[10] | sector[11] << 8;
     for(uint16_t i = 0; i < count && 16 + (i + 1) * 32 <= B2F_SECTOR_SIZE; i++) {
         const uint8_t* entry = sector + 16 + i * 32;
@@ -257,6 +262,7 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
         if(str_equal(name, "prompt/options")) disk->options_lba = get_u32(entry + 16);
         if(str_equal(name, "prompt/kbdtype")) disk->kbdtype_lba = get_u32(entry + 16);
         if(str_equal(name, "prompt/answer")) disk->answer_lba = get_u32(entry + 16);
+        if(str_equal(name, "prompt/timeout")) disk->timeout_lba = get_u32(entry + 16);
     }
     return disk->status_lba != 0 && disk->frame_lba != 0 && disk->mode_lba != 0;
 }
@@ -348,6 +354,15 @@ static int starts_with(const uint8_t* text, const char* prefix) {
     return *prefix == '\0';
 }
 
+static EFI_STATUS b2f_set_answer(const void* value, uint64_t size) {
+    EFI_STATUS status = st->runtime_services->set_variable(
+        u"B2fAnswer", &b2f_vendor_guid, EFI_VARIABLE_BOOTSERVICE_ACCESS, size, value);
+    // An empty answer deletes the variable, which reads as empty too
+    if(size == 0 && status == EFI_NOT_FOUND) status = EFI_SUCCESS;
+    if(EFI_ERROR(status)) print("b2f: cannot set B2fAnswer\n");
+    return status;
+}
+
 // Ask the prompt and wait for the Flipper's user to answer it
 static EFI_STATUS b2f_prompt(B2fDisk* disk, const char* type) {
     EFI_BLOCK_IO* block_io = disk->block_io;
@@ -365,7 +380,13 @@ static EFI_STATUS b2f_prompt(B2fDisk* disk, const char* type) {
         }
         if(starts_with(sector, "cancel\n")) {
             print("b2f: cancelled\n");
+            b2f_set_answer("cancel", 6);
             return EFI_ABORTED;
+        }
+        if(starts_with(sector, "timeout\n")) {
+            print("b2f: timed out\n");
+            b2f_set_answer("timeout", 7);
+            return EFI_TIMEOUT;
         }
         if(starts_with(sector, "ok\n")) break;
         st->boot_services->stall(100000);
@@ -376,12 +397,7 @@ static EFI_STATUS b2f_prompt(B2fDisk* disk, const char* type) {
     uint64_t size = 0;
     while(size < B2F_SECTOR_SIZE - 3 && value[size] && value[size] != '\n')
         size++;
-    status = st->runtime_services->set_variable(
-        u"B2fAnswer", &b2f_vendor_guid, EFI_VARIABLE_BOOTSERVICE_ACCESS, size, value);
-    // An empty answer deletes the variable, which reads as empty too
-    if(size == 0 && status == EFI_NOT_FOUND) status = EFI_SUCCESS;
-    if(EFI_ERROR(status)) print("b2f: cannot set B2fAnswer\n");
-    return status;
+    return b2f_set_answer(value, size);
 }
 
 static EFI_STATUS b2f_frame(B2fDisk* disk, EFI_HANDLE device, const char* name) {
@@ -440,10 +456,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     // No table of names: pointers in data would need relocations
     int known = word_is(args, "status") || word_is(args, "frame") || word_is(args, "mode") ||
                 word_is(args, "clear") || word_is(args, "question") || word_is(args, "options") ||
-                word_is(args, "kbdtype") || word_is(args, "prompt");
+                word_is(args, "kbdtype") || word_is(args, "timeout") || word_is(args, "prompt");
     if(!known) {
         print("usage: b2f.efi status <text> | frame <file> | mode <mode> | clear |\n"
-              "       question <text> | options <a|b|c> | kbdtype <type> | prompt <type>\n");
+              "       question <text> | options <a|b|c> | kbdtype <type> |\n"
+              "       timeout <seconds> | prompt <type>\n");
         return EFI_INVALID_PARAMETER;
     }
 
@@ -469,6 +486,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
         if(word_is(args, "question")) return b2f_text(&disk, disk.question_lba, skip_word(args));
         if(word_is(args, "options")) return b2f_options(&disk, skip_word(args));
         if(word_is(args, "kbdtype")) return b2f_text(&disk, disk.kbdtype_lba, skip_word(args));
+        if(word_is(args, "timeout")) {
+            if(disk.timeout_lba == 0) {
+                print("b2f: this Flipper has no prompt timeout\n");
+                return EFI_UNSUPPORTED;
+            }
+            return b2f_text(&disk, disk.timeout_lba, skip_word(args));
+        }
         return b2f_prompt(&disk, skip_word(args));
     }
 

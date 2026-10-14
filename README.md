@@ -51,7 +51,8 @@ The root directory is at LBA 0x2000, and 0x2001-0x20FF is reserved for a hidden 
 | `.B2F/prompt/question` | 0x2012 | 512 bytes | The question. Lists and keyboards show its first line |
 | `.B2F/prompt/options` | 0x2013 | 1024 bytes | One per line. Confirm: the positive (OK key) then the negative (Back key) button, Yes/No if none, only OK if one. Text: the default. A choice without options is a Yes/No confirm |
 | `.B2F/prompt/kbdtype` | 0x2015 | 512 bytes | Keyboard for `text`: `text` (default), `ip` or `number` |
-| `.B2F/prompt/answer` | 0x2016 | 512 bytes | Read-only. `pending\n` while asking, then `ok\n<value>\n` (the option or text) or `cancel\n` (Back on the Flipper, except on a confirm with a Back button) |
+| `.B2F/prompt/timeout` | 0x2017 | 512 bytes | Seconds to answer, counted down on the Flipper until a key is pressed there. Empty or `0` waits forever |
+| `.B2F/prompt/answer` | 0x2016 | 512 bytes | Read-only. `pending\n` while asking, then `ok\n<value>\n` (the option or text), `cancel\n` (Back on the Flipper, except on a confirm with a Back button) or `timeout\n` |
 
 The LBAs are the same for every boot method. To find the disk (or the area, if the layout ever changes), look for the magic in `info`. Its layout, little-endian:
 
@@ -76,7 +77,7 @@ imgexec ${b2f} mode framebuffer
 imgexec ${b2f} clear
 ```
 
-To ask the Flipper's user, fill in the prompt and run `prompt`, which waits for the answer and fails if the user pressed Back. `${${b2f_answer}}` is the answer (the generated script points `${b2f_answer}` at where the writer left it):
+To ask the Flipper's user, fill in the prompt and run `prompt`, which waits for the answer. `${${b2f_answer}}` is the answer (the generated script points `${b2f_answer}` at where the writer left it). If the user pressed Back or the timeout ran out, `prompt` fails and the answer is `cancel` or `timeout`:
 
 ```
 imgexec ${b2f} question Which OS?
@@ -91,9 +92,21 @@ imgexec ${b2f} prompt text && set server ${${b2f_answer}} || goto cancelled
 imgexec ${b2f} question Reinstall the OS?\nAll data will be erased.
 imgexec ${b2f} options Erase|Keep
 imgexec ${b2f} prompt confirm && set choice ${${b2f_answer}} || goto cancelled
+
+imgexec ${b2f} question Boot Ubuntu?
+imgexec ${b2f} options
+imgexec ${b2f} timeout 10
+imgexec ${b2f} prompt confirm || goto ${${b2f_answer}}
+goto ${${b2f_answer}}
+:Yes
+:timeout
+echo Booting Ubuntu, also when nobody answered
 ```
 
+The timeout stops once a key is pressed on the Flipper, and stays set for later prompts until `timeout 0`.
+
 `\n` starts a new line. `clear` empties the status and frame and goes back to `status` mode. For `frame`, UEFI reads an image fetched with `imgfetch http://server/logo.bin logo.bin`, BIOS opens the given URI (e.g. `http://server/logo.bin`).
+Chainloaded scripts can use `${b2f}` too. On BIOS the writer is an image iPXE got at boot, so an `imgfree` of all images removes it: free images by name (`imgfree <name>`), or write to the Flipper before `imgfree`. On UEFI each call runs `b2f.efi` from the disk and leaves an 8.6KB image until the next `imgfree`.  
 This needs the `-legacy` iPXE builds: the current `ipxe.efi` and `ipxe.lkrn` take over the USB controller, so the Flipper's disk is gone once iPXE runs (booting still works, the writer then fails with an error).
 The writers are built with `tools/b2f_efi/build.sh` and `tools/b2f_pxe/build.sh`.
 

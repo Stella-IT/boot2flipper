@@ -18,6 +18,9 @@ typedef struct ConfirmInput ConfirmInput;
  */
 typedef void (*ConfirmInputCallback)(void* context, bool right);
 
+/** Called on every key press, e.g. to see that the user is there */
+typedef void (*ConfirmInputActivityCallback)(void* context);
+
 ConfirmInput* confirm_input_alloc(void);
 
 void confirm_input_free(ConfirmInput* confirm_input);
@@ -35,6 +38,17 @@ void confirm_input_set(
     const char* text,
     const char* left,
     const char* right);
+
+/**
+ * Show seconds left in the top right corner
+ * @param seconds Seconds, or a negative number to hide it
+ */
+void confirm_input_set_countdown(ConfirmInput* confirm_input, int32_t seconds);
+
+void confirm_input_set_activity_callback(
+    ConfirmInput* confirm_input,
+    ConfirmInputActivityCallback callback,
+    void* context);
 
 void confirm_input_set_callback(
     ConfirmInput* confirm_input,

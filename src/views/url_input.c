@@ -41,6 +41,8 @@ struct UrlInput {
     View* view;
     UrlInputCallback callback;
     void* callback_context;
+    UrlInputActivityCallback activity_callback;
+    void* activity_context;
 };
 
 typedef struct {
@@ -210,6 +212,10 @@ static bool url_input_input_callback(InputEvent* event, void* context) {
     bool consumed = false;
     bool submit = false;
 
+    if(event->type == InputTypePress && url_input->activity_callback) {
+        url_input->activity_callback(url_input->activity_context);
+    }
+
     // Short Back falls through to the view dispatcher (leave without saving)
     if(event->key == InputKeyBack && event->type != InputTypeLong &&
        event->type != InputTypeRepeat) {
@@ -275,6 +281,19 @@ void url_input_free(UrlInput* url_input) {
 
 View* url_input_get_view(UrlInput* url_input) {
     return url_input->view;
+}
+
+void url_input_set_activity_callback(
+    UrlInput* url_input,
+    UrlInputActivityCallback callback,
+    void* context) {
+    url_input->activity_callback = callback;
+    url_input->activity_context = context;
+}
+
+void url_input_select_digits(UrlInput* url_input) {
+    with_view_model(
+        url_input->view, UrlInputModel * model, { model->layer = UrlInputLayerSymbol; }, true);
 }
 
 void url_input_set_header_text(UrlInput* url_input, const char* text) {

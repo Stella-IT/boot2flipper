@@ -23,12 +23,15 @@ struct ConfirmInput {
     View* view;
     ConfirmInputCallback callback;
     void* callback_context;
+    ConfirmInputActivityCallback activity_callback;
+    void* activity_context;
 };
 
 typedef struct {
     const char* text;
     const char* left;
     const char* right;
+    int32_t countdown; // Seconds, negative if hidden
 } ConfirmInputModel;
 
 // Left: Back key, right: OK key
@@ -99,12 +102,22 @@ static void confirm_input_draw_callback(Canvas* canvas, void* _model) {
         text = end ? end + 1 : text + strlen(text);
     }
 
+    if(model->countdown >= 0) {
+        char seconds[12];
+        snprintf(seconds, sizeof(seconds), "%ld", model->countdown);
+        canvas_draw_str_aligned(
+            canvas, canvas_width(canvas) - 2, 1, AlignRight, AlignTop, seconds);
+    }
+
     if(model->left) confirm_input_draw_button(canvas, false, model->left);
     if(model->right) confirm_input_draw_button(canvas, true, model->right);
 }
 
 static bool confirm_input_input_callback(InputEvent* event, void* context) {
     ConfirmInput* confirm_input = context;
+    if(event->type == InputTypePress && confirm_input->activity_callback) {
+        confirm_input->activity_callback(confirm_input->activity_context);
+    }
     if(event->type != InputTypeShort) return false;
     if(event->key != InputKeyOk && event->key != InputKeyBack) return false;
 
@@ -137,7 +150,10 @@ ConfirmInput* confirm_input_alloc(void) {
     with_view_model(
         confirm_input->view,
         ConfirmInputModel * model,
-        { memset(model, 0, sizeof(ConfirmInputModel)); },
+        {
+            memset(model, 0, sizeof(ConfirmInputModel));
+            model->countdown = -1;
+        },
         false);
     return confirm_input;
 }
@@ -166,6 +182,19 @@ void confirm_input_set(
             model->right = right;
         },
         true);
+}
+
+void confirm_input_set_countdown(ConfirmInput* confirm_input, int32_t seconds) {
+    with_view_model(
+        confirm_input->view, ConfirmInputModel * model, { model->countdown = seconds; }, true);
+}
+
+void confirm_input_set_activity_callback(
+    ConfirmInput* confirm_input,
+    ConfirmInputActivityCallback callback,
+    void* context) {
+    confirm_input->activity_callback = callback;
+    confirm_input->activity_context = context;
 }
 
 void confirm_input_set_callback(

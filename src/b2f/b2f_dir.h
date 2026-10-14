@@ -44,10 +44,12 @@
  *                            without options is a Yes/No confirm.
  *                  kbdtype   Keyboard for text: "text" (default), "ip" or
  *                            "number"
+ *                  timeout   Seconds to answer, counted down on the Flipper.
+ *                            Empty or 0 waits forever.
  *                and reads back (read-only):
  *                  answer    Empty before the first prompt, "pending\n" until
  *                            answered, then "ok\n<value>\n" (the option or the
- *                            text) or "cancel\n"
+ *                            text), "cancel\n" or "timeout\n"
  *   .B2F/bin/b2f.efi, .B2F/bin/b2f.pxe
  *                Write the files from iPXE on UEFI and BIOS, see tools/b2f_efi
  *                and tools/b2f_pxe. The BIOS loader passes b2f.pxe as initrd.
@@ -78,15 +80,17 @@
 #define B2F_MODE_LBA    (B2F_FRAME_LBA + B2F_FRAME_SIZE / SECTOR_SIZE)
 #define B2F_MODE_SIZE   SECTOR_SIZE
 
-#define B2F_PROMPT_LBA        0x2010 // .B2F/prompt/
-#define B2F_PROMPT_TYPE_LBA   (B2F_PROMPT_LBA + 1)
-#define B2F_QUESTION_LBA      (B2F_PROMPT_TYPE_LBA + 1)
-#define B2F_QUESTION_SIZE     SECTOR_SIZE
-#define B2F_OPTIONS_LBA       (B2F_QUESTION_LBA + 1)
-#define B2F_OPTIONS_SIZE      (2 * SECTOR_SIZE)
-#define B2F_KBDTYPE_LBA       (B2F_OPTIONS_LBA + B2F_OPTIONS_SIZE / SECTOR_SIZE)
-#define B2F_ANSWER_LBA        (B2F_KBDTYPE_LBA + 1)
-#define B2F_PROMPT_FILES_SIZE SECTOR_SIZE // type, kbdtype and answer
+#define B2F_PROMPT_LBA         0x2010 // .B2F/prompt/
+#define B2F_PROMPT_TYPE_LBA    (B2F_PROMPT_LBA + 1)
+#define B2F_QUESTION_LBA       (B2F_PROMPT_TYPE_LBA + 1)
+#define B2F_QUESTION_SIZE      SECTOR_SIZE
+#define B2F_OPTIONS_LBA        (B2F_QUESTION_LBA + 1)
+#define B2F_OPTIONS_SIZE       (2 * SECTOR_SIZE)
+#define B2F_KBDTYPE_LBA        (B2F_OPTIONS_LBA + B2F_OPTIONS_SIZE / SECTOR_SIZE)
+#define B2F_ANSWER_LBA         (B2F_KBDTYPE_LBA + 1)
+#define B2F_TIMEOUT_LBA        (B2F_ANSWER_LBA + 1)
+#define B2F_PROMPT_FILES_SIZE  SECTOR_SIZE // type, kbdtype, answer and timeout
+#define B2F_PROMPT_TIMEOUT_MAX 3600 // Seconds
 
 #define B2F_BIN_LBA      0x2020
 #define B2F_AREA_END_LBA 0x2100
@@ -95,7 +99,7 @@
 _Static_assert(SECTORS_PER_CLUSTER == 1, ".B2F LBAs need 1 sector clusters");
 _Static_assert(B2F_DIR_LBA == DATA_START_LBA + 1, ".B2F must follow the root directory");
 _Static_assert(B2F_MODE_LBA + B2F_MODE_SIZE / SECTOR_SIZE <= B2F_PROMPT_LBA, ".B2F/mode too big");
-_Static_assert(B2F_ANSWER_LBA < B2F_BIN_LBA, ".B2F/prompt runs into .B2F/bin");
+_Static_assert(B2F_TIMEOUT_LBA < B2F_BIN_LBA, ".B2F/prompt runs into .B2F/bin");
 
 typedef struct B2fDir B2fDir;
 
@@ -132,7 +136,14 @@ typedef struct {
     // Confirm: [0] right and [1] left button. Text: [0] is the default.
     char options[B2F_PROMPT_OPTIONS_MAX][B2F_PROMPT_OPTION_LENGTH];
     uint8_t option_count;
+    uint32_t timeout; // Seconds, 0 waits forever
 } B2fPrompt;
+
+typedef enum {
+    B2fAnswerOk,
+    B2fAnswerCancel,
+    B2fAnswerTimeout,
+} B2fAnswer;
 
 /**
  * Callback function type for .B2F changes, called from the USB thread
@@ -175,9 +186,10 @@ bool b2f_dir_get_prompt(B2fDir* b2f, B2fPrompt* prompt);
 
 /**
  * Answer the waiting prompt and go back to status mode
- * @param answer The chosen option or entered text, or NULL if the user cancelled
+ * @param result How the prompt ended
+ * @param value The chosen option or entered text, for B2fAnswerOk
  */
-void b2f_dir_answer_prompt(B2fDir* b2f, const char* answer);
+void b2f_dir_answer_prompt(B2fDir* b2f, B2fAnswer result, const char* value);
 
 /**
  * Lock the frame against host writes while drawing it

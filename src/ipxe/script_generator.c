@@ -5,21 +5,24 @@
 
 #define TAG "iPXEScript"
 
-// Sets ${b2f} to the .B2F writer: b2f.efi from the disk on UEFI, the BIOS
-// loader's initrd (b2f.pxe) on BIOS. Without a writer it names a missing file,
-// so imgexec fails: left empty, imgexec would run the current script again.
+// Sets ${b2f} to the .B2F writer: b2f.efi on the disk on UEFI, the BIOS
+// loader's initrd (b2f.pxe) on BIOS, which an imgfree of all images removes.
+// Without a writer it names a missing file, so imgexec fails: left empty,
+// imgexec would run the current script again.
 static void append_b2f_setup(FuriString* script, bool bios_writer) {
     furi_string_cat_printf(
         script,
         "# Flipper screen: imgexec ${b2f} status <text> | frame <file> | mode <mode> | clear\n"
         "# Ask the user: imgexec ${b2f} question <text>, options <a|b|c>, kbdtype <type>,\n"
+        "# timeout <seconds>,\n"
         "# then imgexec ${b2f} prompt <choice|confirm|text> && set answer ${${b2f_answer}}\n");
     furi_string_cat_printf(script, "set b2f file:/%s/unavailable\n", B2F_BIN_PATH);
     furi_string_cat_printf(script, "set b2f_answer b2f_result\n");
+    // UEFI runs b2f.efi from the disk each time, so it still works after an imgfree
     furi_string_cat_printf(
         script,
-        "iseq ${platform} efi && imgfetch --name b2f file:/%s && set b2f b2f && "
-        "set b2f_answer efi/B2fAnswer:string || echo -n\n",
+        "iseq ${platform} efi && set b2f file:/%s && set b2f_answer efi/B2fAnswer:string || "
+        "echo -n\n",
         B2F_EFI_PATH);
     if(bios_writer) {
         furi_string_cat_printf(script, "iseq ${platform} pcbios && set b2f <INITRD> || echo -n\n");

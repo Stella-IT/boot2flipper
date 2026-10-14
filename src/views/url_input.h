@@ -16,6 +16,9 @@ typedef struct UrlInput UrlInput;
 
 typedef void (*UrlInputCallback)(void* context);
 
+/** Called on every key press, e.g. to see that the user is typing */
+typedef void (*UrlInputActivityCallback)(void* context);
+
 UrlInput* url_input_alloc(void);
 
 void url_input_free(UrlInput* url_input);
@@ -35,3 +38,11 @@ void url_input_set_result_callback(
     void* callback_context,
     char* text_buffer,
     size_t text_buffer_size);
+
+void url_input_set_activity_callback(
+    UrlInput* url_input,
+    UrlInputActivityCallback callback,
+    void* context);
+
+/** Show the digits and symbols layer, e.g. for numbers. Call after set_result_callback. */
+void url_input_select_digits(UrlInput* url_input);

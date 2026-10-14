@@ -33,6 +33,8 @@ struct IpInput {
     View* view;
     IpInputCallback callback;
     void* callback_context;
+    IpInputActivityCallback activity_callback;
+    void* activity_context;
 };
 
 typedef struct {
@@ -259,6 +261,10 @@ static bool ip_input_input_callback(InputEvent* event, void* context) {
     bool consumed = false;
     bool submit = false;
 
+    if(event->type == InputTypePress && ip_input->activity_callback) {
+        ip_input->activity_callback(ip_input->activity_context);
+    }
+
     // Short Back falls through to the view dispatcher (leave without saving)
     if(event->key == InputKeyBack && event->type != InputTypeLong &&
        event->type != InputTypeRepeat) {
@@ -322,6 +328,14 @@ void ip_input_free(IpInput* ip_input) {
 
 View* ip_input_get_view(IpInput* ip_input) {
     return ip_input->view;
+}
+
+void ip_input_set_activity_callback(
+    IpInput* ip_input,
+    IpInputActivityCallback callback,
+    void* context) {
+    ip_input->activity_callback = callback;
+    ip_input->activity_context = context;
 }
 
 void ip_input_set_header_text(IpInput* ip_input, const char* text) {

@@ -14,10 +14,12 @@
  *   imgexec <INITRD> question Which OS?
  *   imgexec <INITRD> options Ubuntu|Debian|Windows
  *   imgexec <INITRD> kbdtype ip
+ *   imgexec <INITRD> timeout 30
  *   imgexec <INITRD> prompt choice
  *
  * prompt waits for the answer and sets the iPXE setting b2f_result to it with
- * PXENV_FILE_EXEC; it fails if the user cancelled.
+ * PXENV_FILE_EXEC. If the user cancelled or the time ran out, b2f_result is
+ * "cancel" or "timeout" and prompt fails.
  *
  * The arguments come from iPXE's PXENV_FILE_CMDLINE, the frame is read with
  * PXENV_FILE_OPEN/READ (any URI iPXE can open). The Flipper is found by the
@@ -237,6 +239,9 @@ cmd_question:
 cmd_kbdtype:
 	movl	kbdtype_lba, %eax
 	jmp	write_prompt_line
+cmd_timeout:
+	movl	timeout_lba, %eax
+	jmp	write_prompt_line
 cmd_options:
 	call	check_prompt
 	jc	no_prompt
@@ -298,36 +303,20 @@ cmd_prompt:
 	movw	$answer_cancel, %di
 	call	starts_with
 	je	prompt_cancelled
+	movw	$sector, %si
+	movw	$answer_timeout, %di
+	call	starts_with
+	je	prompt_timed_out
 	movb	$0x86, %ah		/* wait 100ms */
 	movw	$0x0001, %cx
 	movw	$0x86a0, %dx
 	int	$0x15
 	jmp	1b
 
-	/* "set b2f_result <the line after ok>" */
-2:	movw	$set_result, %si
-	movw	$cmdline, %di
-3:	lodsb
-	testb	%al, %al
-	jz	4f
-	stosb
-	jmp	3b
-4:	movw	$sector + 3, %si
-	movw	$cmdline + 255, %cx
-	subw	%di, %cx
-5:	lodsb
-	cmpb	$'\n', %al
-	je	6f
-	testb	%al, %al
-	jz	6f
-	stosb
-	loop	5b
-6:	movb	$0, (%di)
-	movw	$exec_params, %di
-	movw	$PXENV_FILE_EXEC, %bx
-	call	pxe_call
-	testw	%ax, %ax
-	jnz	prompt_exec_error
+	/* The answer is the line after "ok" */
+2:	movw	$sector + 3, %si
+	call	set_result
+	jc	prompt_exec_error
 	xorw	%ax, %ax
 9:	ret
 
@@ -335,11 +324,49 @@ prompt_read_error:
 	movw	$msg_read, %si
 	jmp	fail
 prompt_cancelled:
+	movw	$name_cancel, %si
+	call	set_result
 	movw	$msg_cancelled, %si
+	jmp	fail
+prompt_timed_out:
+	movw	$name_timeout, %si
+	call	set_result
+	movw	$msg_timed_out, %si
 	jmp	fail
 prompt_exec_error:
 	movw	$msg_exec, %si
 	jmp	fail
+
+/* Run "set b2f_result <the line at %si>" in iPXE, CF set on error */
+set_result:
+	pushw	%si
+	movw	$set_result_cmd, %si
+	movw	$cmdline, %di
+1:	lodsb
+	testb	%al, %al
+	jz	2f
+	stosb
+	jmp	1b
+2:	popw	%si
+	movw	$cmdline + 255, %cx
+	subw	%di, %cx
+3:	lodsb
+	cmpb	$'\n', %al
+	je	4f
+	testb	%al, %al
+	jz	4f
+	stosb
+	loop	3b
+4:	movb	$0, (%di)
+	movw	$exec_params, %di
+	movw	$PXENV_FILE_EXEC, %bx
+	call	pxe_call
+	testw	%ax, %ax
+	jnz	5f
+	clc
+	ret
+5:	stc
+	ret
 
 /* ZF set if the text at %si starts with the NUL terminated text at %di */
 starts_with:
@@ -567,6 +594,7 @@ commands:
 	.word	name_question, cmd_question
 	.word	name_options, cmd_options
 	.word	name_kbdtype, cmd_kbdtype
+	.word	name_timeout, cmd_timeout
 	.word	name_prompt, cmd_prompt
 	.word	0
 
@@ -580,6 +608,7 @@ info_fields:
 	.word	name_info_options, options_lba
 	.word	name_info_kbdtype, kbdtype_lba
 	.word	name_info_answer, answer_lba
+	.word	name_info_timeout, timeout_lba
 	.word	0
 
 magic:
@@ -600,6 +629,10 @@ name_kbdtype:
 	.asciz	"kbdtype"
 name_prompt:
 	.asciz	"prompt"
+name_timeout:
+	.asciz	"timeout"
+name_cancel:
+	.asciz	"cancel"
 name_info_type:
 	.asciz	"prompt/type"
 name_info_question:
@@ -610,23 +643,30 @@ name_info_kbdtype:
 	.asciz	"prompt/kbdtype"
 name_info_answer:
 	.asciz	"prompt/answer"
+name_info_timeout:
+	.asciz	"prompt/timeout"
 answer_ok:
 	.asciz	"ok\n"
 answer_cancel:
 	.asciz	"cancel\n"
-set_result:
+answer_timeout:
+	.asciz	"timeout\n"
+set_result_cmd:
 	.asciz	"set b2f_result "
 empty:
 	.byte	0
 msg_usage:
 	.ascii	"usage: b2f.pxe status <text> | frame <uri> | mode <mode> | clear |\n"
-	.asciz	"       question <text> | options <a|b|c> | kbdtype <type> | prompt <type>\n"
+	.ascii	"       question <text> | options <a|b|c> | kbdtype <type> |\n"
+	.asciz	"       timeout <seconds> | prompt <type>\n"
 msg_no_prompt:
 	.asciz	"b2f: this Flipper has no prompt\n"
 msg_waiting:
 	.asciz	"b2f: answer on the Flipper\n"
 msg_cancelled:
 	.asciz	"b2f: cancelled\n"
+msg_timed_out:
+	.asciz	"b2f: timed out\n"
 msg_read:
 	.asciz	"b2f: read failed\n"
 msg_exec:
@@ -663,6 +703,8 @@ options_lba:
 kbdtype_lba:
 	.long	0
 answer_lba:
+	.long	0
+timeout_lba:
 	.long	0
 info_lbas_end:
 field:

@@ -18,6 +18,9 @@ typedef struct IpInput IpInput;
 
 typedef void (*IpInputCallback)(void* context);
 
+/** Called on every key press, e.g. to see that the user is typing */
+typedef void (*IpInputActivityCallback)(void* context);
+
 IpInput* ip_input_alloc(void);
 
 void ip_input_free(IpInput* ip_input);
@@ -37,3 +40,8 @@ void ip_input_set_result_callback(
     void* callback_context,
     uint8_t* ip,
     bool prefill);
+
+void ip_input_set_activity_callback(
+    IpInput* ip_input,
+    IpInputActivityCallback callback,
+    void* context);
