@@ -8,10 +8,12 @@
 #include "../../views/url_input.h"
 #include "../../views/ip_input.h"
 #include "../../views/confirm_input.h"
+#include "../../config/config.h"
 #include "../../disk/virtual_fat.h"
 #include "../../b2f/b2f_dir.h"
 #include "../../usb/usb_scsi.h"
 #include "../../usb/usb_msc.h"
+#include "boot_log.h"
 
 typedef enum {
     UsbMassStorageStateIdle,
@@ -39,18 +41,18 @@ typedef struct {
     void* app; // Pointer to App for callbacks
 
     // Configuration from Home scene
-    bool dhcp;
-    FuriString* ip_addr;
-    FuriString* subnet_mask;
-    FuriString* gateway;
-    FuriString* dns;
-    FuriString* chainload_url;
-    FuriString* network_interface;
-    PartitionScheme partition_scheme;
-    bool chainload_enabled;
+    Boot2FlipperConfig* config;
 
     FuriThread* usb_thread;
     FuriString* status_text;
+    size_t status_scroll; // Marquee of status lines too long for the screen
+    bool show_sysinfo; // The host's system information instead of the status
+
+    // Log file of the boot, if the config asks for one
+    BootLog* boot_log;
+    char logged_status[B2F_STATUS_SIZE]; // Last status and sysinfo logged
+    char logged_sysinfo[B2F_SYSINFO_SIZE];
+    char log_buffer[B2F_STATUS_SIZE]; // Used by the USB thread
     FuriString* current_file;
     VirtualFat* vfat;
     B2fDir* b2f;
@@ -82,14 +84,4 @@ bool UsbMassStorage_on_event(void* p, SceneManagerEvent e);
 void UsbMassStorage_on_exit(void* p);
 
 // Helper function to set configuration
-void UsbMassStorage_set_config(
-    AppUsbMassStorage* instance,
-    bool dhcp,
-    const char* ip_addr,
-    const char* subnet_mask,
-    const char* gateway,
-    const char* dns,
-    const char* chainload_url,
-    const char* network_interface,
-    PartitionScheme partition_scheme,
-    bool chainload_enabled);
+void UsbMassStorage_set_config(AppUsbMassStorage* instance, const Boot2FlipperConfig* config);

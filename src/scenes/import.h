@@ -6,5 +6,10 @@
 
 #include "./home/main.h"
 #include "./about/main.h"
+#include "./settings/main.h"
+#include "./advanced/main.h"
+#include "./profiles/main.h"
+#include "./text_edit/main.h"
+#include "./name_edit/main.h"
 #include "./network_settings/main.h"
 #include "./usb_mass_storage/usb_mass_storage.h"

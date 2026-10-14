@@ -37,7 +37,9 @@
 	.set	CHUNK_SECTORS, 32	/* 16KB per disk read */
 	.set	HEAP_END, 0xe000	/* offsets within KERNEL_SEG */
 	.set	CMDLINE_OFF, 0xe000
-	.set	CMDLINE_MAX, 2047	/* iPXE's cmdline_size */
+	/* Up to the end of KERNEL_SEG. ipxe.lkrn's cmdline_size says 2047, but
+	 * iPXE copies the whole NUL terminated command line. */
+	.set	CMDLINE_MAX, 0xffff - CMDLINE_OFF
 
 /*****************************************************************************
  * Stage 1 (MBR)

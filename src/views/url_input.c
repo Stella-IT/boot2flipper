@@ -173,7 +173,12 @@ static bool url_input_press(UrlInputModel* model, bool long_press) {
             }
             return false;
         case SpecialKeyLayer:
-            model->layer = (model->layer + 1) % UrlInputLayerCount;
+            // Long press types a space, which has no key
+            if(long_press) {
+                url_input_insert(model, ' ');
+            } else {
+                model->layer = (model->layer + 1) % UrlInputLayerCount;
+            }
             return false;
         default:
             return true;

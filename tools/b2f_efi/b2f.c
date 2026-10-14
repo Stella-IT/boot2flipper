@@ -11,6 +11,9 @@
 //         it fetched, e.g. "imgfetch http://server/logo.bin logo.bin"
 // mode    What the Flipper shows: "status" or "framebuffer"
 // clear   Clears the status and frame and goes back to status mode
+// sysinfo The host's system information shown on the Flipper, "key=value"
+//         lines, e.g. "platform=${platform}\narch=${buildarch}"
+// log     A line for the Flipper's log file
 //
 // Asking the Flipper's user:
 //   question <text>     Question shown above the options or keyboard
@@ -22,6 +25,12 @@
 //                       ${efi/B2fAnswer:string}. If the user cancelled or the
 //                       time ran out, B2fAnswer is "cancel" or "timeout" and
 //                       prompt fails.
+//
+// script  Writes the answer of the last prompt as an iPXE script to
+//         .B2F/prompt/script, through the file system: the firmware caches
+//         what it read from the disk, so the Flipper's own copy may not be
+//         seen. Runs the command typed on the Flipper with
+//           imgexec ${b2f} script && chain --autofree file:/.B2F/prompt/script
 //
 // The Flipper is found by the "B2F INFO" header at B2F_INFO_LBA on each disk,
 // and the file LBAs are read from it. Freestanding, no EFI library needed: see
@@ -156,7 +165,11 @@ struct EFI_FILE {
     EFI_STATUS(EFIAPI* close)(EFI_FILE* self);
     void* delete_file;
     EFI_STATUS(EFIAPI* read)(EFI_FILE* self, uint64_t* size, void* buffer);
+    EFI_STATUS(EFIAPI* write)(EFI_FILE* self, uint64_t* size, const void* buffer);
 };
+
+#define EFI_FILE_MODE_READ  1
+#define EFI_FILE_MODE_WRITE 2
 
 typedef struct EFI_SIMPLE_FILE_SYSTEM EFI_SIMPLE_FILE_SYSTEM;
 struct EFI_SIMPLE_FILE_SYSTEM {
@@ -229,6 +242,7 @@ typedef struct {
     uint32_t status_lba, frame_lba, mode_lba;
     uint32_t type_lba, question_lba, options_lba, kbdtype_lba, answer_lba; // 0 if missing
     uint32_t timeout_lba; // 0 on Flippers without prompt timeouts
+    uint32_t sysinfo_lba, log_lba; // 0 on Flippers without them
 } B2fDisk;
 
 // Read the .B2F info header, true if the disk is a Flipper
@@ -250,6 +264,7 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
     disk->status_lba = disk->frame_lba = disk->mode_lba = 0;
     disk->type_lba = disk->question_lba = disk->options_lba = disk->kbdtype_lba = 0;
     disk->answer_lba = disk->timeout_lba = 0;
+    disk->sysinfo_lba = disk->log_lba = 0;
     uint16_t count = sector[10] | sector[11] << 8;
     for(uint16_t i = 0; i < count && 16 + (i + 1) * 32 <= B2F_SECTOR_SIZE; i++) {
         const uint8_t* entry = sector + 16 + i * 32;
@@ -263,6 +278,8 @@ static int b2f_disk_probe(EFI_BLOCK_IO* block_io, B2fDisk* disk) {
         if(str_equal(name, "prompt/kbdtype")) disk->kbdtype_lba = get_u32(entry + 16);
         if(str_equal(name, "prompt/answer")) disk->answer_lba = get_u32(entry + 16);
         if(str_equal(name, "prompt/timeout")) disk->timeout_lba = get_u32(entry + 16);
+        if(str_equal(name, "sysinfo")) disk->sysinfo_lba = get_u32(entry + 16);
+        if(str_equal(name, "log")) disk->log_lba = get_u32(entry + 16);
     }
     return disk->status_lba != 0 && disk->frame_lba != 0 && disk->mode_lba != 0;
 }
@@ -434,6 +451,64 @@ static EFI_STATUS b2f_frame(B2fDisk* disk, EFI_HANDLE device, const char* name) 
     return b2f_disk_write(disk, disk->frame_lba, frame, B2F_FRAME_SIZE);
 }
 
+// Write the answer of the last prompt as a script, see "script" above
+static EFI_STATUS b2f_script(B2fDisk* disk) {
+    EFI_BLOCK_IO* block_io = disk->block_io;
+    EFI_STATUS status = block_io->read_blocks(
+        block_io, block_io->media->media_id, disk->answer_lba, B2F_SECTOR_SIZE, sector);
+    if(EFI_ERROR(status) || !starts_with(sector, "ok\n")) {
+        print("b2f: no answer to run\n");
+        return EFI_NOT_FOUND;
+    }
+
+    // "#!ipxe", the answer's line, then newlines up to the file's size
+    static const char header[] = "#!ipxe\n";
+    memset(frame, '\n', B2F_SECTOR_SIZE);
+    size_t length = sizeof(header) - 1;
+    memcpy(frame, header, length);
+    for(const uint8_t* p = sector + 3; p < sector + B2F_SECTOR_SIZE && *p && *p != '\n'; p++) {
+        if(length < B2F_SECTOR_SIZE - 1) frame[length++] = *p;
+    }
+
+    // On the Flipper's file system, the one that has the script (under iPXE,
+    // b2f.efi's own device is iPXE's file system of fetched images)
+    EFI_HANDLE* handles;
+    uint64_t count;
+    EFI_FILE* file = NULL;
+    if(!EFI_ERROR(st->boot_services->locate_handle_buffer(
+           2 /* ByProtocol */, &simple_file_system_guid, NULL, &count, &handles))) {
+        for(uint64_t i = 0; i < count && file == NULL; i++) {
+            EFI_SIMPLE_FILE_SYSTEM* fs;
+            EFI_FILE* root;
+            if(EFI_ERROR(st->boot_services->handle_protocol(
+                   handles[i], &simple_file_system_guid, (void**)&fs)) ||
+               EFI_ERROR(fs->open_volume(fs, &root))) {
+                continue;
+            }
+            if(EFI_ERROR(root->open(
+                   root,
+                   &file,
+                   u"\\.B2F\\prompt\\script",
+                   EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE,
+                   0))) {
+                file = NULL;
+            }
+            root->close(root);
+        }
+        st->boot_services->free_pool(handles);
+    }
+    if(file == NULL) {
+        print("b2f: no prompt script on the Flipper's file system\n");
+        return EFI_NOT_FOUND;
+    }
+    uint64_t size = B2F_SECTOR_SIZE;
+    status = file->write(file, &size, frame);
+    EFI_STATUS close_status = file->close(file);
+    if(!EFI_ERROR(status)) status = close_status;
+    if(EFI_ERROR(status)) print("b2f: cannot write the script\n");
+    return status;
+}
+
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     st = system_table;
 
@@ -456,11 +531,13 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     // No table of names: pointers in data would need relocations
     int known = word_is(args, "status") || word_is(args, "frame") || word_is(args, "mode") ||
                 word_is(args, "clear") || word_is(args, "question") || word_is(args, "options") ||
-                word_is(args, "kbdtype") || word_is(args, "timeout") || word_is(args, "prompt");
+                word_is(args, "kbdtype") || word_is(args, "timeout") || word_is(args, "prompt") ||
+                word_is(args, "sysinfo") || word_is(args, "log") || word_is(args, "script");
     if(!known) {
         print("usage: b2f.efi status <text> | frame <file> | mode <mode> | clear |\n"
               "       question <text> | options <a|b|c> | kbdtype <type> |\n"
-              "       timeout <seconds> | prompt <type>\n");
+              "       timeout <seconds> | prompt <type> | script | sysinfo <text> |\n"
+              "       log <text>\n");
         return EFI_INVALID_PARAMETER;
     }
 
@@ -475,6 +552,14 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
     if(word_is(args, "frame")) {
         return b2f_frame(&disk, loaded_image->device_handle, skip_word(args));
     }
+    if(word_is(args, "sysinfo") || word_is(args, "log")) {
+        uint32_t lba = word_is(args, "log") ? disk.log_lba : disk.sysinfo_lba;
+        if(lba == 0) {
+            print("b2f: this Flipper has no sysinfo or log\n");
+            return EFI_UNSUPPORTED;
+        }
+        return b2f_text(&disk, lba, skip_word(args));
+    }
 
     // Prompt, on a Flipper that has it
     if(!word_is(args, "clear")) {
@@ -486,6 +571,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE* system_table) {
         if(word_is(args, "question")) return b2f_text(&disk, disk.question_lba, skip_word(args));
         if(word_is(args, "options")) return b2f_options(&disk, skip_word(args));
         if(word_is(args, "kbdtype")) return b2f_text(&disk, disk.kbdtype_lba, skip_word(args));
+        if(word_is(args, "script")) return b2f_script(&disk);
         if(word_is(args, "timeout")) {
             if(disk.timeout_lba == 0) {
                 print("b2f: this Flipper has no prompt timeout\n");

@@ -13,6 +13,10 @@
 #define KEY_ICON_BACK_HEIGHT  8
 #define KEY_ICON_OK_WIDTH     7
 #define KEY_ICON_OK_HEIGHT    7
+#define KEY_ICON_LEFT_WIDTH   4
+#define KEY_ICON_LEFT_HEIGHT  7
+#define KEY_ICON_RIGHT_WIDTH  4
+#define KEY_ICON_RIGHT_HEIGHT 7
 
 // clang-format off
 static const uint8_t key_icon_backspace_bits[] = {
@@ -41,4 +45,7 @@ static const uint8_t key_icon_back_bits[] = {
     0x04, 0x00, 0x06, 0x00, 0xff, 0x00, 0x06, 0x01, 0x04, 0x02, 0x00, 0x02, 0x00, 0x01, 0xf8, 0x00};
 
 static const uint8_t key_icon_ok_bits[] = {0x1c, 0x22, 0x5d, 0x5d, 0x5d, 0x22, 0x1c};
+static const uint8_t key_icon_left_bits[] = {0x08, 0x0c, 0x0e, 0x0f, 0x0e, 0x0c, 0x08};
+
+static const uint8_t key_icon_right_bits[] = {0x01, 0x03, 0x07, 0x0f, 0x07, 0x03, 0x01};
 // clang-format on

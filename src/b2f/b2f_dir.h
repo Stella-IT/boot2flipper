@@ -32,6 +32,13 @@
  *                128x64 1-bit frame shown full screen in framebuffer mode.
  *                Rows of 16 bytes from the top, least significant bit is the
  *                leftmost pixel (XBM, as canvas_draw_xbm takes), 1 is black.
+ *   .B2F/sysinfo B2F_SYSINFO_LBA, B2F_SYSINFO_SIZE bytes
+ *                The host's system information, "key=value" lines (e.g.
+ *                platform, arch, manufacturer, product, serial, uuid), shown
+ *                on the Flipper.
+ *   .B2F/log     B2F_LOG_LBA, B2F_LOG_SIZE bytes
+ *                Every write is a line for the Flipper's log file (up to the
+ *                first NUL), when the Flipper keeps one.
  *   .B2F/prompt/ A question for the Flipper's user, asked when mode is set to
  *                B2F_MODE_PROMPT. The host writes:
  *                  type      "choice" (pick an option, the default), "confirm"
@@ -50,6 +57,11 @@
  *                  answer    Empty before the first prompt, "pending\n" until
  *                            answered, then "ok\n<value>\n" (the option or the
  *                            text), "cancel\n" or "timeout\n"
+ *                  script    The answer as an iPXE script, "#!ipxe\n<value>\n"
+ *                            padded with newlines ("#!ipxe\nexit 1\n" if not
+ *                            answered). Writable: UEFI caches what it read,
+ *                            so b2f.efi writes the answer here through the
+ *                            file system before iPXE runs it.
  *   .B2F/bin/b2f.efi, .B2F/bin/b2f.pxe
  *                Write the files from iPXE on UEFI and BIOS, see tools/b2f_efi
  *                and tools/b2f_pxe. The BIOS loader passes b2f.pxe as initrd.
@@ -71,14 +83,18 @@
 
 // Fixed LBAs, part of the host interface (see README). 0x2001-0x20FF is
 // reserved for .B2F, other files start at B2F_AREA_END_LBA.
-#define B2F_DIR_LBA     0x2001
-#define B2F_INFO_LBA    (B2F_DIR_LBA + 1)
-#define B2F_STATUS_LBA  (B2F_INFO_LBA + 1)
-#define B2F_STATUS_SIZE SECTOR_SIZE
-#define B2F_FRAME_LBA   (B2F_STATUS_LBA + B2F_STATUS_SIZE / SECTOR_SIZE)
-#define B2F_FRAME_SIZE  (128 * 64 / 8)
-#define B2F_MODE_LBA    (B2F_FRAME_LBA + B2F_FRAME_SIZE / SECTOR_SIZE)
-#define B2F_MODE_SIZE   SECTOR_SIZE
+#define B2F_DIR_LBA      0x2001
+#define B2F_INFO_LBA     (B2F_DIR_LBA + 1)
+#define B2F_STATUS_LBA   (B2F_INFO_LBA + 1)
+#define B2F_STATUS_SIZE  SECTOR_SIZE
+#define B2F_FRAME_LBA    (B2F_STATUS_LBA + B2F_STATUS_SIZE / SECTOR_SIZE)
+#define B2F_FRAME_SIZE   (128 * 64 / 8)
+#define B2F_MODE_LBA     (B2F_FRAME_LBA + B2F_FRAME_SIZE / SECTOR_SIZE)
+#define B2F_MODE_SIZE    SECTOR_SIZE
+#define B2F_SYSINFO_LBA  (B2F_MODE_LBA + B2F_MODE_SIZE / SECTOR_SIZE)
+#define B2F_SYSINFO_SIZE SECTOR_SIZE
+#define B2F_LOG_LBA      (B2F_SYSINFO_LBA + B2F_SYSINFO_SIZE / SECTOR_SIZE)
+#define B2F_LOG_SIZE     SECTOR_SIZE
 
 #define B2F_PROMPT_LBA         0x2010 // .B2F/prompt/
 #define B2F_PROMPT_TYPE_LBA    (B2F_PROMPT_LBA + 1)
@@ -89,6 +105,7 @@
 #define B2F_KBDTYPE_LBA        (B2F_OPTIONS_LBA + B2F_OPTIONS_SIZE / SECTOR_SIZE)
 #define B2F_ANSWER_LBA         (B2F_KBDTYPE_LBA + 1)
 #define B2F_TIMEOUT_LBA        (B2F_ANSWER_LBA + 1)
+#define B2F_SCRIPT_LBA         (B2F_TIMEOUT_LBA + 1)
 #define B2F_PROMPT_FILES_SIZE  SECTOR_SIZE // type, kbdtype, answer and timeout
 #define B2F_PROMPT_TIMEOUT_MAX 3600 // Seconds
 
@@ -98,8 +115,8 @@
 // Clusters are 1 sector, so every LBA in the data area is a cluster
 _Static_assert(SECTORS_PER_CLUSTER == 1, ".B2F LBAs need 1 sector clusters");
 _Static_assert(B2F_DIR_LBA == DATA_START_LBA + 1, ".B2F must follow the root directory");
-_Static_assert(B2F_MODE_LBA + B2F_MODE_SIZE / SECTOR_SIZE <= B2F_PROMPT_LBA, ".B2F/mode too big");
-_Static_assert(B2F_TIMEOUT_LBA < B2F_BIN_LBA, ".B2F/prompt runs into .B2F/bin");
+_Static_assert(B2F_LOG_LBA + B2F_LOG_SIZE / SECTOR_SIZE <= B2F_PROMPT_LBA, ".B2F files too big");
+_Static_assert(B2F_SCRIPT_LBA < B2F_BIN_LBA, ".B2F/prompt runs into .B2F/bin");
 
 typedef struct B2fDir B2fDir;
 
@@ -151,6 +168,12 @@ typedef enum {
  */
 typedef void (*B2fDirUpdateCallback)(void* context);
 
+/**
+ * Callback for a line the host wrote to .B2F/log, called from the USB thread
+ * @param line Printable ASCII, without newlines
+ */
+typedef void (*B2fDirLogCallback)(void* context, const char* line);
+
 B2fDir* b2f_dir_alloc(void);
 
 void b2f_dir_free(B2fDir* b2f);
@@ -163,6 +186,14 @@ void b2f_dir_free(B2fDir* b2f);
 bool b2f_dir_add_to(B2fDir* b2f, VirtualFat* vfat);
 
 void b2f_dir_set_update_callback(B2fDir* b2f, B2fDirUpdateCallback callback, void* context);
+
+void b2f_dir_set_log_callback(B2fDir* b2f, B2fDirLogCallback callback, void* context);
+
+/**
+ * Copy the host's system information, printable ASCII and newlines only
+ * @return Text length, 0 if the host didn't write it
+ */
+size_t b2f_dir_get_sysinfo(B2fDir* b2f, char* text, size_t size);
 
 /**
  * Copy the status text, printable ASCII and newlines only

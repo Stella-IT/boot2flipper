@@ -21,6 +21,13 @@
  * PXENV_FILE_EXEC. If the user cancelled or the time ran out, b2f_result is
  * "cancel" or "timeout" and prompt fails.
  *
+ *   imgexec <INITRD> sysinfo platform=${platform}\narch=${buildarch}
+ *   imgexec <INITRD> log Some line for the Flipper's log file
+ *   imgexec <INITRD> exec
+ *
+ * exec runs the answer of the last prompt as an iPXE command, with
+ * PXENV_FILE_EXEC, and fails if the command fails or there is no answer.
+ *
  * The arguments come from iPXE's PXENV_FILE_CMDLINE, the frame is read with
  * PXENV_FILE_OPEN/READ (any URI iPXE can open). The Flipper is found by the
  * "B2F INFO" header at B2F_INFO_LBA, read with INT 13h extensions, and the
@@ -114,6 +121,17 @@ cmd_status:
 cmd_mode:
 	movl	mode_lba, %eax
 	jmp	write_line_file
+
+cmd_sysinfo:
+	movl	sysinfo_lba, %eax
+	jmp	write_optional_line
+cmd_log:
+	movl	log_lba, %eax
+write_optional_line:
+	testl	%eax, %eax
+	jnz	write_line_file
+	movw	$msg_no_file, %si
+	jmp	fail
 
 /* Write the text at %si to the 1 sector file at %eax */
 write_line_file:
@@ -337,10 +355,39 @@ prompt_exec_error:
 	movw	$msg_exec, %si
 	jmp	fail
 
+/* Run the answer of the last prompt as an iPXE command */
+cmd_exec:
+	call	check_prompt
+	jc	no_prompt
+	movl	answer_lba, %eax
+	movw	$1, %cx
+	movw	$sector, %bx
+	movb	$0x42, %dh
+	call	disk_io
+	jc	prompt_read_error
+	movw	$sector, %si
+	movw	$answer_ok, %di
+	call	starts_with
+	jne	1f
+	movw	$sector + 3, %si
+	movw	$empty, %bx
+	call	exec_line
+	jc	2f
+	xorw	%ax, %ax
+	ret
+1:	movw	$msg_no_answer, %si
+	jmp	fail
+2:	movw	$1, %ax			/* the command printed why */
+	ret
+
 /* Run "set b2f_result <the line at %si>" in iPXE, CF set on error */
 set_result:
+	movw	$set_result_cmd, %bx
+/* Run the NUL terminated text at %bx followed by the line at %si in iPXE,
+ * CF set on error */
+exec_line:
 	pushw	%si
-	movw	$set_result_cmd, %si
+	movw	%bx, %si
 	movw	$cmdline, %di
 1:	lodsb
 	testb	%al, %al
@@ -596,6 +643,9 @@ commands:
 	.word	name_kbdtype, cmd_kbdtype
 	.word	name_timeout, cmd_timeout
 	.word	name_prompt, cmd_prompt
+	.word	name_sysinfo, cmd_sysinfo
+	.word	name_log, cmd_log
+	.word	name_exec, cmd_exec
 	.word	0
 
 /* Info header entries and where their LBA goes */
@@ -603,6 +653,8 @@ info_fields:
 	.word	name_status, status_lba
 	.word	name_frame, frame_lba
 	.word	name_mode, mode_lba
+	.word	name_sysinfo, sysinfo_lba
+	.word	name_log, log_lba
 	.word	name_info_type, type_lba
 	.word	name_info_question, question_lba
 	.word	name_info_options, options_lba
@@ -631,6 +683,12 @@ name_prompt:
 	.asciz	"prompt"
 name_timeout:
 	.asciz	"timeout"
+name_sysinfo:
+	.asciz	"sysinfo"
+name_log:
+	.asciz	"log"
+name_exec:
+	.asciz	"exec"
 name_cancel:
 	.asciz	"cancel"
 name_info_type:
@@ -658,9 +716,14 @@ empty:
 msg_usage:
 	.ascii	"usage: b2f.pxe status <text> | frame <uri> | mode <mode> | clear |\n"
 	.ascii	"       question <text> | options <a|b|c> | kbdtype <type> |\n"
-	.asciz	"       timeout <seconds> | prompt <type>\n"
+	.ascii	"       timeout <seconds> | prompt <type> | exec |\n"
+	.asciz	"       sysinfo <text> | log <text>\n"
 msg_no_prompt:
 	.asciz	"b2f: this Flipper has no prompt\n"
+msg_no_file:
+	.asciz	"b2f: this Flipper has no sysinfo or log\n"
+msg_no_answer:
+	.asciz	"b2f: no answer to run\n"
 msg_waiting:
 	.asciz	"b2f: answer on the Flipper\n"
 msg_cancelled:
@@ -693,6 +756,10 @@ status_lba:
 frame_lba:
 	.long	0
 mode_lba:
+	.long	0
+sysinfo_lba:
+	.long	0
+log_lba:
 	.long	0
 type_lba:
 	.long	0

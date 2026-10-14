@@ -10,8 +10,9 @@
  * Stage 2 loads the kernel (ipxe.lkrn) and passes the command line and initrd.
  */
 
-// Longest command line stage 2 passes (ipxe.lkrn's cmdline_size)
-#define BIOS_BOOT_CMDLINE_MAX 2047
+// Longest command line stage 2 passes, up to the end of the kernel's real-mode
+// segment (iPXE copies all of it, though its cmdline_size says 2047)
+#define BIOS_BOOT_CMDLINE_MAX 8191
 
 typedef struct {
     uint32_t kernel_lba; // First disk sector of the kernel file

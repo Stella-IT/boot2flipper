@@ -20,6 +20,8 @@ struct B2fDir {
     FuriMutex* mutex;
     B2fDirUpdateCallback callback;
     void* callback_context;
+    B2fDirLogCallback log_callback;
+    void* log_context;
 
     uint8_t info[SECTOR_SIZE];
     uint8_t status_host[B2F_STATUS_SIZE];
@@ -27,6 +29,9 @@ struct B2fDir {
     uint8_t frame_host[B2F_FRAME_SIZE];
     uint8_t frame_shown[B2F_FRAME_SIZE];
     uint8_t mode_host[B2F_MODE_SIZE]; // Also written by the Flipper after an answer
+    uint8_t sysinfo_host[B2F_SYSINFO_SIZE];
+    uint8_t sysinfo_shown[B2F_SYSINFO_SIZE];
+    uint8_t log_host[B2F_LOG_SIZE];
 
     // .B2F/prompt/, read by the Flipper when the prompt starts
     uint8_t prompt_type[B2F_PROMPT_FILES_SIZE];
@@ -35,6 +40,7 @@ struct B2fDir {
     uint8_t kbdtype[B2F_PROMPT_FILES_SIZE];
     uint8_t timeout[B2F_PROMPT_FILES_SIZE];
     uint8_t answer[B2F_PROMPT_FILES_SIZE]; // Written by the Flipper, read by the USB thread
+    uint8_t script[B2F_PROMPT_FILES_SIZE]; // Like answer
 
     B2fMode mode;
     bool prompt_waiting;
@@ -44,6 +50,8 @@ struct B2fDir {
     B2fFile status_file;
     B2fFile frame_file;
     B2fFile mode_file;
+    B2fFile sysinfo_file;
+    B2fFile log_file;
     B2fFile prompt_file;
 };
 
@@ -87,6 +95,8 @@ B2fDir* b2f_dir_alloc(void) {
     b2f->status_file = (B2fFile){b2f, b2f->status_host, b2f->status_shown};
     b2f->frame_file = (B2fFile){b2f, b2f->frame_host, b2f->frame_shown};
     b2f->mode_file = (B2fFile){b2f, b2f->mode_host, NULL};
+    b2f->sysinfo_file = (B2fFile){b2f, b2f->sysinfo_host, b2f->sysinfo_shown};
+    b2f->log_file = (B2fFile){b2f, b2f->log_host, NULL};
     b2f->prompt_file = (B2fFile){b2f, NULL, NULL};
     b2f->mode = B2fModeStatus;
 
@@ -113,6 +123,20 @@ static void b2f_dir_set_file(uint8_t* buffer, size_t size, const char* text, con
             buffer[length++] = value[i];
         }
         buffer[length] = '\n';
+    }
+    FURI_CRITICAL_EXIT();
+}
+
+// The answer as a script for UEFI iPXE, which runs it from the disk. Padded
+// with newlines, the file is a sector long.
+static void b2f_dir_set_script(B2fDir* b2f, const char* value) {
+    FURI_CRITICAL_ENTER();
+    memset(b2f->script, '\n', sizeof(b2f->script));
+    size_t length = strlen("#!ipxe\n");
+    memcpy(b2f->script, "#!ipxe\n", length);
+    if(value == NULL) value = "exit 1";
+    for(size_t i = 0; value[i] && length < sizeof(b2f->script) - 1; i++) {
+        b2f->script[length++] = value[i];
     }
     FURI_CRITICAL_EXIT();
 }
@@ -223,15 +247,48 @@ static void b2f_dir_mode_written(B2fDir* b2f) {
         b2f_dir_parse_prompt(b2f);
         b2f->prompt_waiting = true;
         b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_PENDING, NULL);
+        b2f_dir_set_script(b2f, NULL);
     } else {
         b2f->mode = B2fModeStatus;
     }
+}
+
+// Copy text up to the first NUL, printable ASCII only (and newlines if
+// keep_newlines), without trailing newlines
+static size_t b2f_dir_copy_text(
+    const uint8_t* source,
+    size_t source_size,
+    char* text,
+    size_t size,
+    bool keep_newlines) {
+    size_t length = 0;
+    for(size_t i = 0; i < source_size && length + 1 < size; i++) {
+        char ch = (char)source[i];
+        if(ch == '\0') break;
+        if((ch == '\n' && keep_newlines) || (ch >= ' ' && ch <= '~')) text[length++] = ch;
+    }
+    while(length > 0 && text[length - 1] == '\n')
+        length--;
+    text[length] = '\0';
+    return length;
 }
 
 // The virtual FAT wrote to a host buffer
 static void b2f_dir_file_written(void* context, uint32_t offset, uint32_t size) {
     B2fFile* file = context;
     B2fDir* b2f = file->b2f;
+
+    // Every write of the log is a line, also the same line again
+    if(file == &b2f->log_file) {
+        char line[B2F_LOG_SIZE];
+        b2f_dir_copy_text(b2f->log_host, B2F_LOG_SIZE, line, sizeof(line), false);
+        furi_mutex_acquire(b2f->mutex, FuriWaitForever);
+        B2fDirLogCallback callback = b2f->log_callback;
+        void* log_context = b2f->log_context;
+        furi_mutex_release(b2f->mutex);
+        if(callback) callback(log_context, line);
+        return;
+    }
 
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
     if(file->shown) memcpy(file->shown + offset, file->host + offset, size);
@@ -262,6 +319,13 @@ bool b2f_dir_add_to(B2fDir* b2f, VirtualFat* vfat) {
          &b2f->status_file},
         {B2F_DIR_PATH, "frame", B2F_FRAME_LBA, b2f->frame_host, B2F_FRAME_SIZE, &b2f->frame_file},
         {B2F_DIR_PATH, "mode", B2F_MODE_LBA, b2f->mode_host, B2F_MODE_SIZE, &b2f->mode_file},
+        {B2F_DIR_PATH,
+         "sysinfo",
+         B2F_SYSINFO_LBA,
+         b2f->sysinfo_host,
+         B2F_SYSINFO_SIZE,
+         &b2f->sysinfo_file},
+        {B2F_DIR_PATH, "log", B2F_LOG_LBA, b2f->log_host, B2F_LOG_SIZE, &b2f->log_file},
         {B2F_PROMPT_PATH,
          "type",
          B2F_PROMPT_TYPE_LBA,
@@ -293,7 +357,14 @@ bool b2f_dir_add_to(B2fDir* b2f, VirtualFat* vfat) {
          b2f->timeout,
          B2F_PROMPT_FILES_SIZE,
          &b2f->prompt_file},
+        {B2F_PROMPT_PATH,
+         "script",
+         B2F_SCRIPT_LBA,
+         b2f->script,
+         B2F_PROMPT_FILES_SIZE,
+         &b2f->prompt_file},
     };
+    b2f_dir_set_script(b2f, NULL);
 
     // The header lists every file
     put_u16(b2f->info + 10, 0);
@@ -365,22 +436,26 @@ void b2f_dir_set_update_callback(B2fDir* b2f, B2fDirUpdateCallback callback, voi
     furi_mutex_release(b2f->mutex);
 }
 
+void b2f_dir_set_log_callback(B2fDir* b2f, B2fDirLogCallback callback, void* context) {
+    furi_mutex_acquire(b2f->mutex, FuriWaitForever);
+    b2f->log_callback = callback;
+    b2f->log_context = context;
+    furi_mutex_release(b2f->mutex);
+}
+
 size_t b2f_dir_get_status(B2fDir* b2f, char* text, size_t size) {
     if(size == 0) return 0;
-    size_t length = 0;
-
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
-    for(size_t i = 0; i < B2F_STATUS_SIZE && length + 1 < size; i++) {
-        char ch = (char)b2f->status_shown[i];
-        if(ch == '\0') break;
-        if(ch == '\n' || (ch >= ' ' && ch <= '~')) text[length++] = ch; // Drops '\r' etc.
-    }
+    size_t length = b2f_dir_copy_text(b2f->status_shown, B2F_STATUS_SIZE, text, size, true);
     furi_mutex_release(b2f->mutex);
+    return length;
+}
 
-    // Trailing newlines don't make a line
-    while(length > 0 && text[length - 1] == '\n')
-        length--;
-    text[length] = '\0';
+size_t b2f_dir_get_sysinfo(B2fDir* b2f, char* text, size_t size) {
+    if(size == 0) return 0;
+    furi_mutex_acquire(b2f->mutex, FuriWaitForever);
+    size_t length = b2f_dir_copy_text(b2f->sysinfo_shown, B2F_SYSINFO_SIZE, text, size, true);
+    furi_mutex_release(b2f->mutex);
     return length;
 }
 
@@ -403,6 +478,7 @@ void b2f_dir_answer_prompt(B2fDir* b2f, B2fAnswer result, const char* value) {
     furi_mutex_acquire(b2f->mutex, FuriWaitForever);
     if(b2f->prompt_waiting) {
         b2f->prompt_waiting = false;
+        b2f_dir_set_script(b2f, result == B2fAnswerOk ? value : NULL);
         if(result == B2fAnswerOk) {
             b2f_dir_set_file(b2f->answer, B2F_PROMPT_FILES_SIZE, B2F_ANSWER_OK, value);
         } else if(result == B2fAnswerTimeout) {

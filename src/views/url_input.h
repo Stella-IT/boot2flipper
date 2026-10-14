@@ -9,7 +9,8 @@
  * This keyboard has three layers (lowercase, uppercase, digits/symbols), with
  * '.', '/', ':' and '-' on the letter layers too.
  *
- * Keys: OK types, long OK types the other case (or clears all on backspace),
+ * Keys: OK types, long OK types the other case (clears all on backspace, types a
+ * space on the layer key),
  * long/repeat Back deletes, short Back leaves without saving.
  */
 typedef struct UrlInput UrlInput;

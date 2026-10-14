@@ -1,5 +1,6 @@
 #include "config.h"
 #include <storage/storage.h>
+#include <string.h>
 #include "../log.h"
 
 #define TAG "Boot2FlipperConfig"
@@ -13,9 +14,15 @@ Boot2FlipperConfig* config_alloc() {
     config->gateway = furi_string_alloc_set("192.168.1.1");
     config->dns = furi_string_alloc_set("8.8.8.8");
     config->chainload_url = furi_string_alloc_set("http://boot.ipxe.org/demo/boot.php");
-    config->network_interface = furi_string_alloc_set("auto"); // Default: auto-detect
+    config->chainload_args = furi_string_alloc();
+    config->chainload_file = furi_string_alloc();
+    config->chainload_target = CHAINLOAD_TARGET_URL;
+    config->network_interface = furi_string_alloc_set(NETWORK_INTERFACE_AUTO);
     config->partition_scheme = PARTITION_SCHEME_HYBRID; // Default: BIOS and UEFI
-    config->chainload_enabled = true; // Default: chainloading enabled
+    config->status_report = true;
+    config->b2f_quiet = true;
+    config->collect_sysinfo = false;
+    config->write_log = false;
 
     return config;
 }
@@ -28,6 +35,8 @@ void config_free(Boot2FlipperConfig* config) {
     furi_string_free(config->gateway);
     furi_string_free(config->dns);
     furi_string_free(config->chainload_url);
+    furi_string_free(config->chainload_args);
+    furi_string_free(config->chainload_file);
     furi_string_free(config->network_interface);
 
     free(config);
@@ -42,9 +51,15 @@ void config_copy(Boot2FlipperConfig* dest, const Boot2FlipperConfig* src) {
     furi_string_set(dest->gateway, src->gateway);
     furi_string_set(dest->dns, src->dns);
     furi_string_set(dest->chainload_url, src->chainload_url);
+    furi_string_set(dest->chainload_args, src->chainload_args);
+    furi_string_set(dest->chainload_file, src->chainload_file);
+    dest->chainload_target = src->chainload_target;
     furi_string_set(dest->network_interface, src->network_interface);
     dest->partition_scheme = src->partition_scheme;
-    dest->chainload_enabled = src->chainload_enabled;
+    dest->status_report = src->status_report;
+    dest->b2f_quiet = src->b2f_quiet;
+    dest->collect_sysinfo = src->collect_sysinfo;
+    dest->write_log = src->write_log;
 }
 
 bool config_save(Storage* storage, const Boot2FlipperConfig* config, const char* file_path) {
@@ -119,9 +134,20 @@ bool config_save(Storage* storage, const Boot2FlipperConfig* config, const char*
             break;
         }
 
-        // Write chainload enabled flag
-        if(!flipper_format_write_bool(file, "Chainload_Enabled", &config->chainload_enabled, 1)) {
-            B2F_LOG_E(TAG, "Failed to write chainload enabled flag");
+        // Write chainload target, arguments and file
+        uint32_t chainload_target = (uint32_t)config->chainload_target;
+        if(!flipper_format_write_uint32(file, "Chainload_Target", &chainload_target, 1) ||
+           !flipper_format_write_string(file, "Chainload_Args", config->chainload_args) ||
+           !flipper_format_write_string(file, "Chainload_File", config->chainload_file)) {
+            B2F_LOG_E(TAG, "Failed to write chainload target");
+            break;
+        }
+
+        if(!flipper_format_write_bool(file, "Status_Report", &config->status_report, 1) ||
+           !flipper_format_write_bool(file, "B2F_Quiet", &config->b2f_quiet, 1) ||
+           !flipper_format_write_bool(file, "Collect_Sysinfo", &config->collect_sysinfo, 1) ||
+           !flipper_format_write_bool(file, "Write_Log", &config->write_log, 1)) {
+            B2F_LOG_E(TAG, "Failed to write advanced settings");
             break;
         }
 
@@ -219,10 +245,45 @@ bool config_load(Storage* storage, Boot2FlipperConfig* config, const char* file_
             config->partition_scheme = PARTITION_SCHEME_HYBRID;
         }
 
-        // Read chainload enabled flag (optional for backward compatibility)
-        if(!flipper_format_read_bool(file, "Chainload_Enabled", &config->chainload_enabled, 1)) {
-            B2F_LOG_W(TAG, "Chainload enabled flag not found, using default (enabled)");
-            config->chainload_enabled = true;
+        // Read chainload target (optional, older files have Chainload_Enabled)
+        uint32_t chainload_target = CHAINLOAD_TARGET_URL;
+        bool chainload_enabled = true;
+        // Keys are looked up from the current position, so rewind for optional ones
+        flipper_format_rewind(file);
+        if(flipper_format_read_uint32(file, "Chainload_Target", &chainload_target, 1) &&
+           chainload_target < CHAINLOAD_TARGET_COUNT) {
+            config->chainload_target = (ChainloadTarget)chainload_target;
+        } else if(
+            flipper_format_rewind(file) &&
+            flipper_format_read_bool(file, "Chainload_Enabled", &chainload_enabled, 1)) {
+            config->chainload_target = chainload_enabled ? CHAINLOAD_TARGET_URL :
+                                                           CHAINLOAD_TARGET_SHELL;
+        } else {
+            config->chainload_target = CHAINLOAD_TARGET_URL;
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_string(file, "Chainload_Args", config->chainload_args)) {
+            furi_string_reset(config->chainload_args);
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_string(file, "Chainload_File", config->chainload_file)) {
+            furi_string_reset(config->chainload_file);
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_bool(file, "Status_Report", &config->status_report, 1)) {
+            config->status_report = true;
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_bool(file, "B2F_Quiet", &config->b2f_quiet, 1)) {
+            config->b2f_quiet = true;
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_bool(file, "Collect_Sysinfo", &config->collect_sysinfo, 1)) {
+            config->collect_sysinfo = false;
+        }
+        flipper_format_rewind(file);
+        if(!flipper_format_read_bool(file, "Write_Log", &config->write_log, 1)) {
+            config->write_log = false;
         }
 
         success = true;
@@ -234,4 +295,44 @@ bool config_load(Storage* storage, Boot2FlipperConfig* config, const char* file_
     flipper_format_free(file);
 
     return success;
+}
+
+bool config_load_last(Storage* storage, Boot2FlipperConfig* config, FuriString* file_path) {
+    furi_string_set_str(file_path, CONFIG_FILE_PATH);
+
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, CONFIG_LAST_PROFILE_PATH, FSAM_READ, FSOM_OPEN_EXISTING)) {
+        char path[256];
+        size_t size = storage_file_read(file, path, sizeof(path) - 1);
+        path[size] = '\0';
+        if(size > 0) furi_string_set_str(file_path, path);
+    }
+    storage_file_free(file);
+
+    // Loaded into a copy, a failed load leaves the configuration as is
+    Boot2FlipperConfig* loaded = config_alloc();
+    bool success = config_load(storage, loaded, furi_string_get_cstr(file_path));
+    if(!success && furi_string_cmp_str(file_path, CONFIG_FILE_PATH) != 0) {
+        furi_string_set_str(file_path, CONFIG_FILE_PATH);
+        success = config_load(storage, loaded, CONFIG_FILE_PATH);
+    }
+    if(success) config_copy(config, loaded);
+    config_free(loaded);
+    return success;
+}
+
+void config_set_last(Storage* storage, const char* file_path) {
+    storage_common_mkdir(storage, CONFIG_DIR_PATH);
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, CONFIG_LAST_PROFILE_PATH, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        storage_file_write(file, file_path, strlen(file_path));
+    }
+    storage_file_free(file);
+}
+
+void config_get_profile_name(const char* file_path, FuriString* name) {
+    const char* slash = strrchr(file_path, '/');
+    furi_string_set_str(name, slash ? slash + 1 : file_path);
+    size_t dot = furi_string_search_rchar(name, '.', 0);
+    if(dot != FURI_STRING_FAILURE && dot > 0) furi_string_left(name, dot);
 }

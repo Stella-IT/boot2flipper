@@ -142,10 +142,49 @@ static void make_short_name(char* short_name, const char* name, bool split_exten
     }
 }
 
+// Lowercase flags in byte 12 of a directory entry, as Windows NT writes them
+#define DIR_CASE_LOWER_BASE      0x08
+#define DIR_CASE_LOWER_EXTENSION 0x10
+
+// Case of the letters in name[0..length): 1 upper, 2 lower, 3 mixed, 0 none.
+// Sets *valid to false if a character can't be in an 8.3 name.
+static uint8_t short_name_case(const char* name, size_t length, bool* valid) {
+    uint8_t found = 0;
+    for(size_t i = 0; i < length; i++) {
+        unsigned char ch = name[i];
+        if(isupper(ch)) {
+            found |= 1;
+        } else if(islower(ch)) {
+            found |= 2;
+        } else if(!isdigit(ch) && !strchr("!#$%&'()-@^_`{}~", ch)) {
+            *valid = false;
+        }
+    }
+    return found;
+}
+
+// Names that fit 8.3 with one case per part need no LFN entries, which saves
+// directory entries: the 8.3 name and its lowercase flags hold them.
+static uint8_t short_name_flags(const char* name, size_t length) {
+    const char* dot = memchr(name, '.', length);
+    size_t base = dot ? (size_t)(dot - name) : length;
+    size_t extension = dot ? length - base - 1 : 0;
+    if(base == 0 || base > 8 || extension > 3 || (dot && extension == 0)) return 0;
+    if(dot && memchr(dot + 1, '.', extension)) return 0;
+
+    bool valid = true;
+    uint8_t base_case = short_name_case(name, base, &valid);
+    uint8_t extension_case = dot ? short_name_case(dot + 1, extension, &valid) : 0;
+    if(!valid || base_case == 3 || extension_case == 3) return 0;
+    return 1 + (base_case == 2 ? DIR_CASE_LOWER_BASE : 0) +
+           (extension_case == 2 ? DIR_CASE_LOWER_EXTENSION : 0);
+}
+
 static void set_long_name(VirtualFatFile* file, const char* name, size_t length) {
     if(length >= sizeof(file->long_name)) length = sizeof(file->long_name) - 1;
     memcpy(file->long_name, name, length);
     file->long_name[length] = '\0';
+    file->short_case = short_name_flags(name, length);
 }
 
 static void sd_file_close(VirtualFat* vfat) {
@@ -961,7 +1000,7 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
         }
 
         // Write LFN entries if long name exists
-        if(file->long_name[0] != '\0') {
+        if(file->long_name[0] != '\0' && !file->short_case) {
             uint8_t lfn_len = strlen(file->long_name);
             uint8_t lfn_entries = (lfn_len + 12) / 13; // Each LFN entry holds 13 chars
             uint8_t checksum = lfn_checksum(file->name);
@@ -980,6 +1019,7 @@ static void generate_root_directory(VirtualFat* vfat, uint8_t* buffer) {
         uint8_t attributes = (file->is_directory ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE) |
                              file->attributes;
         write_directory_entry(entry, file->name, attributes, file->start_cluster, file->size);
+        if(file->short_case) entry[12] = file->short_case - 1;
 
         B2F_LOG_I(
             TAG,
@@ -1039,7 +1079,7 @@ static void generate_subdirectory(VirtualFat* vfat, int8_t dir_index, uint8_t* b
         }
 
         // Write LFN entries if long name exists
-        if(file->long_name[0] != '\0') {
+        if(file->long_name[0] != '\0' && !file->short_case) {
             uint8_t lfn_len = strlen(file->long_name);
             uint8_t lfn_entries = (lfn_len + 12) / 13;
             uint8_t checksum = lfn_checksum(file->name);
@@ -1057,6 +1097,7 @@ static void generate_subdirectory(VirtualFat* vfat, int8_t dir_index, uint8_t* b
         uint8_t attributes = (file->is_directory ? FAT_ATTR_DIRECTORY : FAT_ATTR_ARCHIVE) |
                              file->attributes;
         write_directory_entry(entry, file->name, attributes, file->start_cluster, file->size);
+        if(file->short_case) entry[12] = file->short_case - 1;
 
         entry += 32;
         entry_count++;

@@ -62,7 +62,7 @@ void register_scenes(App* app) {
     view_dispatcher_set_navigation_event_callback(
         app->view_dispatcher, scene_handler_navigation_forwarder);
     view_dispatcher_set_tick_event_callback(
-        app->view_dispatcher, scene_handler_tick_forwarder, 500);
+        app->view_dispatcher, scene_handler_tick_forwarder, 300);
     B2F_LOG_I(APP_NAME, "View dispatcher callbacks set");
 
     View* view = NULL;
@@ -109,14 +109,6 @@ void free_scenes(App* app) {
     free(app->allocated_scenes);
     app->allocated_scenes = NULL;
 
-    B2F_LOG_I(APP_NAME, "Removing Home's custom views from dispatcher");
-    // Home scene registers custom views with IDs 100-103 that need to be removed
-    view_dispatcher_remove_view(app->view_dispatcher, 100); // HOME_VIEW_MAIN_LIST
-    view_dispatcher_remove_view(app->view_dispatcher, 101); // HOME_VIEW_TEXT_INPUT
-    view_dispatcher_remove_view(app->view_dispatcher, 102); // HOME_VIEW_FILE_BROWSER
-    view_dispatcher_remove_view(app->view_dispatcher, 103); // HOME_VIEW_URL_INPUT
-    B2F_LOG_I(APP_NAME, "Home's custom views removed");
-
     B2F_LOG_I(APP_NAME, "Freeing View dispatcher.");
     furi_assert(app->view_dispatcher != NULL, "View dispatcher is NULL.");
     view_dispatcher_free(app->view_dispatcher);
@@ -124,7 +116,4 @@ void free_scenes(App* app) {
     B2F_LOG_I(APP_NAME, "Freeing SceneManager");
     furi_assert(app->scene_manager != NULL, "Scene manager is NULL.");
     scene_manager_free(app->scene_manager);
-
-    B2F_LOG_I(APP_NAME, "Freeing App");
-    free(app);
 }

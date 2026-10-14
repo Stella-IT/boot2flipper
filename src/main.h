@@ -11,6 +11,16 @@
 
 #define APP_NAME "Boot2Flipper"
 
+// Text edited by the TextEdit and NameEdit scenes
+typedef enum {
+    EditTargetChainloadUrl,
+    EditTargetChainloadArgs,
+    EditTargetInterface,
+    EditTargetProfileName,
+} EditTarget;
+
+#define APP_EDIT_BUFFER_SIZE 256
+
 typedef struct App {
     Gui* gui;
     Storage* storage;
@@ -21,8 +31,11 @@ typedef struct App {
 
     void** allocated_scenes;
 
-    FuriString* config_file;
+    FuriString* config_file; // Profile being edited, saved on changes
     Boot2FlipperConfig* config;
+
+    EditTarget edit_target;
+    char edit_buffer[APP_EDIT_BUFFER_SIZE];
 } App;
 
 /**
@@ -35,6 +48,11 @@ typedef enum {
 
     AppSceneNum, // This should be the last element in the enumeration.
 } AppViews;
+
+/**
+ * Save the configuration to the current profile and remember it as the last one
+ */
+void app_save_config(App* app);
 
 /**
  * Header definition for handler.c

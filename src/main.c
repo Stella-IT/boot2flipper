@@ -5,6 +5,12 @@
 #include "scenes/register.h"
 #include "log.h"
 
+void app_save_config(App* app) {
+    if(config_save(app->storage, app->config, furi_string_get_cstr(app->config_file))) {
+        config_set_last(app->storage, furi_string_get_cstr(app->config_file));
+    }
+}
+
 int main() {
     App* app = malloc(sizeof(App));
     furi_assert(app != NULL, "Failed to allocate memory for the app");
@@ -22,7 +28,9 @@ int main() {
     // Initialize global configuration
     app->config = config_alloc();
 
-    app->config_file = furi_string_alloc_printf("/ext/apps_data/boot2flipper/config.b2f");
+    // Start with the profile used last
+    app->config_file = furi_string_alloc();
+    config_load_last(app->storage, app->config, app->config_file);
 
     register_scenes(app);
     view_dispatcher_attach_to_gui(app->view_dispatcher, app->gui, ViewDispatcherTypeFullscreen);
@@ -45,6 +53,8 @@ int main() {
 
     // Free global configuration
     config_free(app->config);
+    furi_string_free(app->config_file);
+    free(app);
 
     B2F_LOG_I(APP_NAME, "Freed app.");
 

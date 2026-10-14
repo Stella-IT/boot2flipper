@@ -2,6 +2,7 @@
 
 #include <furi.h>
 #include <gui/view.h>
+#include <gui/view_dispatcher.h>
 #include <gui/modules/variable_item_list.h>
 #include "../../views/ip_input.h"
 
@@ -13,7 +14,7 @@ typedef enum {
 } NetworkFieldType;
 
 typedef enum {
-    NETWORK_VIEW_MAIN_LIST = 200,
+    NETWORK_VIEW_MAIN_LIST, // The scene's view
     NETWORK_VIEW_IP_INPUT = 201,
 } NetworkView;
 
@@ -31,6 +32,7 @@ typedef struct {
     NetworkFieldType editing_field;
 
     NetworkView current_view;
+    ViewDispatcher* view_dispatcher; // Set once the IP input view is added
 } AppNetworkSettings;
 
 AppNetworkSettings* NetworkSettings_alloc();

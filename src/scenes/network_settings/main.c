@@ -23,6 +23,7 @@ AppNetworkSettings* NetworkSettings_alloc() {
 
     settings->editing_field = NETWORK_FIELD_IP;
     settings->current_view = NETWORK_VIEW_MAIN_LIST;
+    settings->view_dispatcher = NULL;
 
     return settings;
 }
@@ -30,6 +31,10 @@ AppNetworkSettings* NetworkSettings_alloc() {
 void NetworkSettings_free(void* ptr) {
     AppNetworkSettings* settings = (AppNetworkSettings*)ptr;
     if(settings == NULL) return;
+
+    if(settings->view_dispatcher != NULL) {
+        view_dispatcher_remove_view(settings->view_dispatcher, NETWORK_VIEW_IP_INPUT);
+    }
 
     if(settings->ip_input != NULL) {
         ip_input_free(settings->ip_input);
@@ -45,15 +50,7 @@ void NetworkSettings_free(void* ptr) {
 View* NetworkSettings_get_view(void* ptr) {
     AppNetworkSettings* settings = (AppNetworkSettings*)ptr;
     if(!settings) return NULL;
-
-    switch(settings->current_view) {
-    case NETWORK_VIEW_MAIN_LIST:
-        return variable_item_list_get_view(settings->var_item_list);
-    case NETWORK_VIEW_IP_INPUT:
-        return ip_input_get_view(settings->ip_input);
-    default:
-        return variable_item_list_get_view(settings->var_item_list);
-    }
+    return variable_item_list_get_view(settings->var_item_list);
 }
 
 static void NetworkSettings_build_menu(App* app) {
@@ -132,7 +129,7 @@ static void NetworkSettings_ip_input_callback(void* context) {
 
     settings->current_view = NETWORK_VIEW_MAIN_LIST;
     NetworkSettings_build_menu(app);
-    view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
+    view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
 }
 
 static void NetworkSettings_enter_callback(void* context, uint32_t index) {
@@ -196,22 +193,17 @@ void NetworkSettings_on_enter(void* context) {
     AppNetworkSettings* settings = app->allocated_scenes[THIS_SCENE];
     if(!settings) return;
 
-    // Register both views only once
-    static bool views_registered = false;
-    if(!views_registered) {
-        view_dispatcher_add_view(
-            app->view_dispatcher,
-            NETWORK_VIEW_MAIN_LIST,
-            variable_item_list_get_view(settings->var_item_list));
+    // The list is the scene's view, the IP input is added once
+    if(settings->view_dispatcher == NULL) {
         view_dispatcher_add_view(
             app->view_dispatcher, NETWORK_VIEW_IP_INPUT, ip_input_get_view(settings->ip_input));
-        views_registered = true;
+        settings->view_dispatcher = app->view_dispatcher;
     }
 
     NetworkSettings_build_menu(app);
 
     settings->current_view = NETWORK_VIEW_MAIN_LIST;
-    view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
+    view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
 }
 
 bool NetworkSettings_on_event(void* context, SceneManagerEvent event) {
@@ -225,14 +217,14 @@ bool NetworkSettings_on_event(void* context, SceneManagerEvent event) {
         if(settings->current_view == NETWORK_VIEW_IP_INPUT) {
             // Return to main list from IP input
             settings->current_view = NETWORK_VIEW_MAIN_LIST;
-            view_dispatcher_switch_to_view(app->view_dispatcher, NETWORK_VIEW_MAIN_LIST);
+            view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
             return true; // Consume the back event
         }
-        // From main list, go back to Home scene
+        // From main list, go back to the settings
         return false; // Don't consume, let scene manager handle navigation
     }
 
-    return true; // Handle other events
+    return false;
 }
 
 void NetworkSettings_on_exit(void* context) {

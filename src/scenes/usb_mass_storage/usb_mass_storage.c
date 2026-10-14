@@ -1,3 +1,4 @@
+#include <gui/elements.h>
 #include "../../main.h"
 #include "usb_mass_storage.h"
 #include "../../ipxe/script_generator.h"
@@ -7,6 +8,8 @@
 #include "../../usb/usb_scsi.h"
 #include "../../usb/usb_msc.h"
 #include "../../log.h"
+#include "../../views/key_icons.h"
+#include "../../views/tab_button.h"
 
 #define THIS_SCENE UsbMassStorage
 
@@ -17,25 +20,79 @@
 #define STATUS_LINES       3
 #define STATUS_LINE_HEIGHT 10
 
-// Status text set by the host through .B2F/status, one line per '\n'
-static void usb_mass_storage_draw_status(Canvas* canvas, const char* text) {
+// Status text set by the host through .B2F/status, one line per '\n',
+// lines too long for the screen scroll
+static void usb_mass_storage_draw_status(Canvas* canvas, const char* text, size_t scroll) {
+    FuriString* line_text = furi_string_alloc();
     uint8_t y = 24;
     for(uint8_t line = 0; line < STATUS_LINES && *text != '\0'; line++) {
         const char* end = strchr(text, '\n');
         size_t length = end ? (size_t)(end - text) : strlen(text);
-
-        char buffer[64];
-        if(length >= sizeof(buffer)) length = sizeof(buffer) - 1;
-        memcpy(buffer, text, length);
-        buffer[length] = '\0';
-        while(length > 0 && canvas_string_width(canvas, buffer) > 116) {
-            buffer[--length] = '\0';
-        }
-        canvas_draw_str(canvas, 10, y, buffer);
+        furi_string_set_strn(line_text, text, length);
+        elements_scrollable_text_line(canvas, 10, y, 116, line_text, scroll, false);
 
         y += STATUS_LINE_HEIGHT;
         text = end ? end + 1 : text + strlen(text);
     }
+    furi_string_free(line_text);
+}
+
+// Value of "key=value" in the host's system information, empty if missing
+static void usb_mass_storage_sysinfo_value(const char* sysinfo, const char* key, FuriString* out) {
+    furi_string_reset(out);
+    size_t key_length = strlen(key);
+    for(const char* line = sysinfo; *line != '\0';) {
+        const char* end = strchr(line, '\n');
+        size_t length = end ? (size_t)(end - line) : strlen(line);
+        if(length > key_length && memcmp(line, key, key_length) == 0 && line[key_length] == '=') {
+            furi_string_set_strn(out, line + key_length + 1, length - key_length - 1);
+            return;
+        }
+        line = end ? end + 1 : line + length;
+    }
+}
+
+#define SYSINFO_LINE_FIRST  20 // Baselines, clear of the buttons
+#define SYSINFO_LINE_HEIGHT 9
+
+// The host's system information: model, serial number, UUID and platform.
+// Labels stay, values too long for the screen scroll.
+static void usb_mass_storage_draw_sysinfo(Canvas* canvas, const char* sysinfo, size_t scroll) {
+    canvas_draw_str(canvas, 2, 10, "System Info");
+    canvas_set_font(canvas, FontSecondary);
+
+    FuriString* value = furi_string_alloc();
+    FuriString* line = furi_string_alloc();
+    static const char* const rows[][3] = {
+        {NULL, "manufacturer", "product"},
+        {"S/N", "serial", NULL},
+        {"UUID", "uuid", NULL},
+        {NULL, "platform", "arch"},
+    };
+    for(uint8_t row = 0; row < COUNT_OF(rows); row++) {
+        furi_string_reset(line);
+        for(uint8_t key = 1; key < 3 && rows[row][key]; key++) {
+            usb_mass_storage_sysinfo_value(sysinfo, rows[row][key], value);
+            if(furi_string_empty(value)) continue;
+            if(!furi_string_empty(line)) furi_string_push_back(line, ' ');
+            furi_string_cat(line, value);
+        }
+        if(furi_string_empty(line)) furi_string_set_str(line, "-");
+
+        int32_t y = SYSINFO_LINE_FIRST + row * SYSINFO_LINE_HEIGHT;
+        int32_t x = 2;
+        if(rows[row][0]) {
+            canvas_draw_str(canvas, x, y, rows[row][0]);
+            x += canvas_string_width(canvas, rows[row][0]) + 4;
+        }
+        elements_scrollable_text_line(
+            canvas, x, y, canvas_width(canvas) - x - 1, line, scroll, false);
+    }
+    furi_string_free(line);
+    furi_string_free(value);
+
+    tab_button_draw(
+        canvas, false, key_icon_back_bits, KEY_ICON_BACK_WIDTH, KEY_ICON_BACK_HEIGHT, "Status");
 }
 
 static void usb_mass_storage_draw_callback(Canvas* canvas, void* model) {
@@ -69,13 +126,20 @@ static void usb_mass_storage_draw_callback(Canvas* canvas, void* model) {
             break;
         }
 
+        char sysinfo[B2F_SYSINFO_SIZE] = "";
+        if(instance->b2f) b2f_dir_get_sysinfo(instance->b2f, sysinfo, sizeof(sysinfo));
+        if(instance->show_sysinfo && sysinfo[0] != '\0') {
+            usb_mass_storage_draw_sysinfo(canvas, sysinfo, instance->status_scroll);
+            break;
+        }
+
         canvas_draw_str(canvas, 10, 12, "Boot2Flipper Ready");
         canvas_set_font(canvas, FontSecondary);
 
         // Status from the host replaces the file being read
         char status[STATUS_LINES * 64] = "";
         if(instance->b2f && b2f_dir_get_status(instance->b2f, status, sizeof(status)) > 0) {
-            usb_mass_storage_draw_status(canvas, status);
+            usb_mass_storage_draw_status(canvas, status, instance->status_scroll);
         } else {
             canvas_draw_str(canvas, 10, 24, "Active and ready");
         }
@@ -90,7 +154,17 @@ static void usb_mass_storage_draw_callback(Canvas* canvas, void* model) {
         }
 
         canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 10, 58, "Press BACK to stop");
+        tab_button_draw(
+            canvas, false, key_icon_back_bits, KEY_ICON_BACK_WIDTH, KEY_ICON_BACK_HEIGHT, "Stop");
+        if(sysinfo[0] != '\0') {
+            tab_button_draw(
+                canvas,
+                true,
+                key_icon_right_bits,
+                KEY_ICON_RIGHT_WIDTH,
+                KEY_ICON_RIGHT_HEIGHT,
+                "System Info");
+        }
         break;
     }
 
@@ -154,34 +228,158 @@ static void file_read_callback(const char* filename, void* context) {
     }
 }
 
-static FuriString*
-    usb_mass_storage_generate_script(AppUsbMassStorage* instance, bool bios_writer) {
-    if(instance->dhcp) {
-        return ipxe_script_generate_dhcp(
-            furi_string_get_cstr(instance->chainload_url),
-            furi_string_get_cstr(instance->network_interface),
-            instance->chainload_enabled,
-            bios_writer);
+// Longest SD card script for CHAINLOAD_TARGET_FILE, inlined on BIOS
+#define CHAIN_FILE_MAX 8192
+
+// Reads the CHAINLOAD_TARGET_FILE script for BIOS iPXE, which can't read the disk
+static FuriString* usb_mass_storage_read_chain_file(Storage* storage, const char* path) {
+    FuriString* content = NULL;
+    File* file = storage_file_alloc(storage);
+    if(storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING) &&
+       storage_file_size(file) <= CHAIN_FILE_MAX) {
+        size_t size = storage_file_size(file);
+        char* buffer = malloc(size + 1);
+        if(storage_file_read(file, buffer, size) == size) {
+            buffer[size] = '\0';
+            content = furi_string_alloc_set_str(buffer);
+        }
+        free(buffer);
     }
-    return ipxe_script_generate_static(
-        furi_string_get_cstr(instance->ip_addr),
-        furi_string_get_cstr(instance->subnet_mask),
-        furi_string_get_cstr(instance->gateway),
-        furi_string_get_cstr(instance->dns),
-        furi_string_get_cstr(instance->chainload_url),
-        furi_string_get_cstr(instance->network_interface),
-        instance->chainload_enabled,
-        bios_writer);
+    storage_file_free(file);
+    return content;
+}
+
+static const char* const chainload_target_names[CHAINLOAD_TARGET_COUNT] =
+    {"URL", "Script", "iPXE shell", "Flipper shell"};
+static const char* const partition_scheme_names[PARTITION_SCHEME_COUNT] = {"MBR", "UEFI", "Hybrid"};
+
+// The settings the boot starts with
+static void usb_mass_storage_log_config(AppUsbMassStorage* instance) {
+    const Boot2FlipperConfig* config = instance->config;
+    App* app = instance->app;
+    BootLog* log = instance->boot_log;
+    if(log == NULL) return;
+
+    boot_log_write(log, "Boot2Flipper, profile %s", furi_string_get_cstr(app->config_file));
+    if(config->dhcp) {
+        boot_log_write(
+            log, "Network: DHCP on %s", furi_string_get_cstr(config->network_interface));
+    } else {
+        boot_log_write(
+            log,
+            "Network: %s/%s gateway %s DNS %s on %s",
+            furi_string_get_cstr(config->ip_addr),
+            furi_string_get_cstr(config->subnet_mask),
+            furi_string_get_cstr(config->gateway),
+            furi_string_get_cstr(config->dns),
+            furi_string_get_cstr(config->network_interface));
+    }
+    boot_log_write(
+        log,
+        "Boot method: %s, then: %s %s %s",
+        partition_scheme_names[config->partition_scheme],
+        chainload_target_names[config->chainload_target],
+        config->chainload_target == CHAINLOAD_TARGET_URL ?
+            furi_string_get_cstr(config->chainload_url) :
+        config->chainload_target == CHAINLOAD_TARGET_FILE ?
+            furi_string_get_cstr(config->chainload_file) :
+            "",
+        config->chainload_target == CHAINLOAD_TARGET_URL ?
+            furi_string_get_cstr(config->chainload_args) :
+            "");
+}
+
+// Builds the disk's files after .B2F, returns an error message or NULL
+static const char* usb_mass_storage_add_files(AppUsbMassStorage* instance, Storage* storage) {
+    const Boot2FlipperConfig* config = instance->config;
+    VirtualFat* vfat = instance->vfat;
+    const char* chain_file = furi_string_get_cstr(config->chainload_file);
+    bool chain_from_file = config->chainload_target == CHAINLOAD_TARGET_FILE;
+
+    // UEFI iPXE runs AUTOEXEC.IPXE and chains CHAIN.IPXE from the disk
+    FuriString* script = ipxe_script_generate(config, true, NULL);
+    bool added = virtual_fat_add_text_file(vfat, "AUTOEXEC.IPXE", furi_string_get_cstr(script));
+    furi_string_free(script);
+    if(!added) return "Failed to add AUTOEXEC.IPXE";
+    if(chain_from_file &&
+       !virtual_fat_add_sd_file(storage, vfat, IPXE_SCRIPT_CHAIN_FILE, chain_file)) {
+        return "Failed to add chain script";
+    }
+
+    // BIOS iPXE runs BOOT.CFG as its command line, with the .B2F writer as
+    // initrd. A script too long for the command line is passed as initrd
+    // instead, without the writer.
+    FuriString* chain_script = NULL;
+    if(chain_from_file) {
+        chain_script = usb_mass_storage_read_chain_file(storage, chain_file);
+        if(!chain_script) return "Chain script too large";
+    }
+    const char* local_script = chain_script ? furi_string_get_cstr(chain_script) : NULL;
+    script = ipxe_script_generate(config, true, local_script);
+    bool bios_cmdline = furi_string_size(script) <= BIOS_BOOT_CMDLINE_MAX;
+    if(!bios_cmdline) {
+        furi_string_free(script);
+        script = ipxe_script_generate(config, false, local_script);
+    }
+    if(chain_script) furi_string_free(chain_script);
+    added = virtual_fat_add_text_file(vfat, "BOOT.CFG", furi_string_get_cstr(script));
+    furi_string_free(script);
+    if(!added) return "Failed to add BOOT.CFG";
+
+    if(!virtual_fat_add_sd_file(storage, vfat, "IPXE.LKR", IPXE_BIOS_PATH)) {
+        return "Failed to add IPXE.LKR";
+    }
+    if(!virtual_fat_add_file_to_subdir(storage, vfat, "EFI/BOOT", "BOOTX64.EFI", IPXE_UEFI_PATH)) {
+        return "Failed to add BOOTX64.EFI";
+    }
+
+    // Legacy BIOS boot loads IPXE.LKR with the script and the .B2F writer
+    if(!virtual_fat_set_bios_boot_files(
+           vfat,
+           "IPXE.LKR",
+           bios_cmdline ? B2F_PXE_PATH : "BOOT.CFG",
+           bios_cmdline ? "BOOT.CFG" : NULL)) {
+        return "Failed to set up BIOS boot";
+    }
+    return NULL;
 }
 
 // The host wrote to .B2F, called from the USB thread
+// Log the status and system information when the host changes them
+static void usb_mass_storage_log_changes(AppUsbMassStorage* instance) {
+    if(instance->boot_log == NULL) return;
+    b2f_dir_get_status(instance->b2f, instance->log_buffer, sizeof(instance->log_buffer));
+    if(strcmp(instance->log_buffer, instance->logged_status) != 0) {
+        strlcpy(instance->logged_status, instance->log_buffer, sizeof(instance->logged_status));
+        boot_log_write(instance->boot_log, "Status: %s", instance->log_buffer);
+    }
+    b2f_dir_get_sysinfo(instance->b2f, instance->log_buffer, sizeof(instance->log_buffer));
+    if(strcmp(instance->log_buffer, instance->logged_sysinfo) != 0) {
+        strlcpy(instance->logged_sysinfo, instance->log_buffer, sizeof(instance->logged_sysinfo));
+        // One line per key
+        for(char* line = instance->log_buffer; *line != '\0';) {
+            char* end = strchr(line, '\n');
+            if(end) *end = '\0';
+            boot_log_write(instance->boot_log, "System: %s", line);
+            line = end ? end + 1 : line + strlen(line);
+        }
+    }
+}
+
+static void b2f_log_callback(void* context, const char* line) {
+    AppUsbMassStorage* instance = context;
+    boot_log_write(instance->boot_log, "Host: %s", line);
+}
+
 static void b2f_update_callback(void* context) {
     AppUsbMassStorage* instance = (AppUsbMassStorage*)context;
+    usb_mass_storage_log_changes(instance);
     if(b2f_dir_get_mode(instance->b2f) == B2fModePrompt) {
         // Views are switched on the GUI thread
         view_dispatcher_send_custom_event(((App*)instance->app)->view_dispatcher, EVENT_PROMPT);
         return;
     }
+    instance->status_scroll = 0; // New status scrolls from its start
     view_get_model(instance->view);
     view_commit_model(instance->view, true);
 }
@@ -193,6 +391,12 @@ static void usb_mass_storage_answer_prompt(
     const char* value) {
     if(instance->prompt_view == 0) return;
     instance->prompt_view = 0;
+    boot_log_write(
+        instance->boot_log,
+        "Answer: %s",
+        result == B2fAnswerOk      ? value :
+        result == B2fAnswerTimeout ? "(timeout)" :
+                                     "(cancel)");
     if(instance->b2f) b2f_dir_answer_prompt(instance->b2f, result, value);
     view_dispatcher_switch_to_view(((App*)instance->app)->view_dispatcher, THIS_SCENE);
 }
@@ -355,6 +559,19 @@ static void usb_mass_storage_show_prompt(AppUsbMassStorage* instance) {
         instance->prompt_view = USB_MASS_STORAGE_VIEW_PROMPT_TEXT;
     }
 
+    if(instance->boot_log) {
+        FuriString* options = furi_string_alloc();
+        for(uint8_t i = 0; i < prompt->option_count; i++) {
+            furi_string_cat_printf(options, " [%s]", prompt->options[i]);
+        }
+        boot_log_write(
+            instance->boot_log,
+            "Prompt: %s%s",
+            instance->prompt_title,
+            furi_string_get_cstr(options));
+        furi_string_free(options);
+    }
+
     usb_mass_storage_update_countdown(instance);
     view_dispatcher_switch_to_view(app->view_dispatcher, instance->prompt_view);
 }
@@ -367,6 +584,16 @@ static bool usb_mass_storage_input_callback(InputEvent* event, void* context) {
     }
 
     App* app = (App*)instance->app;
+
+    // Right shows the host's system information, Left goes back
+    if(event->type == InputTypeShort && instance->state == UsbMassStorageStateActive &&
+       (event->key == InputKeyRight || event->key == InputKeyLeft)) {
+        instance->show_sysinfo = event->key == InputKeyRight;
+        instance->status_scroll = 0;
+        view_get_model(instance->view);
+        view_commit_model(instance->view, true);
+        return true;
+    }
 
     if(event->type == InputTypeShort && event->key == InputKeyOk) {
         if(instance->state == UsbMassStorageStateIdle) {
@@ -398,6 +625,8 @@ AppUsbMassStorage* UsbMassStorage_alloc() {
     instance->usb_thread = NULL;
     instance->vfat = NULL;
     instance->b2f = NULL;
+    instance->boot_log = NULL;
+    instance->show_sysinfo = false;
     instance->scsi = NULL;
     instance->msc = NULL;
 
@@ -413,15 +642,9 @@ AppUsbMassStorage* UsbMassStorage_alloc() {
     instance->prompt_view = 0;
     memset(&instance->prompt, 0, sizeof(instance->prompt));
 
-    instance->ip_addr = furi_string_alloc();
-    instance->subnet_mask = furi_string_alloc();
-    instance->gateway = furi_string_alloc();
-    instance->dns = furi_string_alloc();
-    instance->chainload_url = furi_string_alloc();
-    instance->network_interface = furi_string_alloc();
+    instance->config = config_alloc();
     instance->status_text = furi_string_alloc();
     instance->current_file = furi_string_alloc();
-    instance->chainload_enabled = true; // Default: enabled
 
     return instance;
 }
@@ -445,6 +668,7 @@ void UsbMassStorage_free(void* ptr) {
     }
 
     b2f_dir_free(instance->b2f);
+    boot_log_close(instance->boot_log);
 
     // The prompt views are removed before they are freed
     if(instance->prompt_views_added) {
@@ -459,12 +683,7 @@ void UsbMassStorage_free(void* ptr) {
     ip_input_free(instance->prompt_ip);
     confirm_input_free(instance->prompt_confirm);
 
-    furi_string_free(instance->ip_addr);
-    furi_string_free(instance->subnet_mask);
-    furi_string_free(instance->gateway);
-    furi_string_free(instance->dns);
-    furi_string_free(instance->chainload_url);
-    furi_string_free(instance->network_interface);
+    config_free(instance->config);
     furi_string_free(instance->status_text);
     furi_string_free(instance->current_file);
 
@@ -484,26 +703,8 @@ View* UsbMassStorage_get_view(void* ptr) {
     return instance->view;
 }
 
-void UsbMassStorage_set_config(
-    AppUsbMassStorage* instance,
-    bool dhcp,
-    const char* ip_addr,
-    const char* subnet_mask,
-    const char* gateway,
-    const char* dns,
-    const char* chainload_url,
-    const char* network_interface,
-    PartitionScheme partition_scheme,
-    bool chainload_enabled) {
-    instance->dhcp = dhcp;
-    furi_string_set_str(instance->ip_addr, ip_addr);
-    furi_string_set_str(instance->subnet_mask, subnet_mask);
-    furi_string_set_str(instance->gateway, gateway);
-    furi_string_set_str(instance->dns, dns);
-    furi_string_set_str(instance->chainload_url, chainload_url);
-    furi_string_set_str(instance->network_interface, network_interface);
-    instance->partition_scheme = partition_scheme;
-    instance->chainload_enabled = chainload_enabled;
+void UsbMassStorage_set_config(AppUsbMassStorage* instance, const Boot2FlipperConfig* config) {
+    config_copy(instance->config, config);
 }
 
 void UsbMassStorage_on_enter(void* context) {
@@ -536,6 +737,8 @@ void UsbMassStorage_on_enter(void* context) {
     }
 
     view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
+    // Start pressed on the dashboard
+    view_dispatcher_send_custom_event(app->view_dispatcher, EVENT_START);
 }
 
 bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
@@ -544,6 +747,11 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
 
     if(event.type == SceneManagerEventTypeTick) {
         usb_mass_storage_update_countdown(instance);
+        if(instance->state == UsbMassStorageStateActive && instance->prompt_view == 0) {
+            instance->status_scroll++;
+            view_get_model(instance->view);
+            view_commit_model(instance->view, true);
+        }
         return false;
     }
 
@@ -573,33 +781,20 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
                 return true;
             }
 
-            // 2. Generate iPXE script
-            FuriString* ipxe_script = usb_mass_storage_generate_script(instance, true);
-
-            if(!ipxe_script) {
-                furi_string_set(instance->status_text, "Failed to generate script");
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
-            }
-
-            // 3. Create virtual FAT filesystem
+            // 2. Create virtual FAT filesystem
             instance->vfat = virtual_fat_alloc();
-
-            // Set partition scheme from config
-            virtual_fat_set_partition_scheme(instance->vfat, instance->partition_scheme);
-
-            // Register file read callback
+            virtual_fat_set_partition_scheme(instance->vfat, instance->config->partition_scheme);
             virtual_fat_set_read_callback(instance->vfat, file_read_callback, instance);
 
-            // .B2F goes first, the other files are placed after its reserved area
+            // 3. .B2F goes first, the other files are placed after its reserved area
             b2f_dir_free(instance->b2f);
             instance->b2f = b2f_dir_alloc();
             b2f_dir_set_update_callback(instance->b2f, b2f_update_callback, instance);
-            if(!b2f_dir_add_to(instance->b2f, instance->vfat)) {
-                furi_string_set(instance->status_text, "Failed to add .B2F");
-                furi_string_free(ipxe_script);
+            const char* error = b2f_dir_add_to(instance->b2f, instance->vfat) ?
+                                    usb_mass_storage_add_files(instance, storage) :
+                                    "Failed to add .B2F";
+            if(error) {
+                furi_string_set(instance->status_text, error);
                 virtual_fat_free(instance->vfat);
                 instance->vfat = NULL;
                 instance->state = UsbMassStorageStateError;
@@ -608,80 +803,15 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
                 return true;
             }
 
-            // CONVERT TO c strings
-            const char* ipxe_script_cstr = furi_string_get_cstr(ipxe_script);
-
-            // Add iPXE script as AUTOEXEC.IPXE in root
-            if(!virtual_fat_add_text_file(instance->vfat, "AUTOEXEC.IPXE", ipxe_script_cstr)) {
-                furi_string_set(instance->status_text, "Failed to add AUTOEXEC.IPXE");
-                furi_string_free(ipxe_script);
-                virtual_fat_free(instance->vfat);
-                instance->vfat = NULL;
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
-            }
-
-            // BIOS iPXE runs BOOT.CFG as its command line, with the .B2F writer as
-            // initrd. A script too long for the command line is passed as initrd
-            // instead, without the writer.
-            bool bios_cmdline = furi_string_size(ipxe_script) <= BIOS_BOOT_CMDLINE_MAX;
-            if(!bios_cmdline) {
-                furi_string_free(ipxe_script);
-                ipxe_script = usb_mass_storage_generate_script(instance, false);
-                ipxe_script_cstr = furi_string_get_cstr(ipxe_script);
-            }
-
-            // Add iPXE script as BOOT.CFG in root
-            if(!virtual_fat_add_text_file(instance->vfat, "BOOT.CFG", ipxe_script_cstr)) {
-                furi_string_set(instance->status_text, "Failed to add BOOT.CFG");
-                furi_string_free(ipxe_script);
-                virtual_fat_free(instance->vfat);
-                instance->vfat = NULL;
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
-            }
-            furi_string_free(ipxe_script);
-
-            // Add BIOS iPXE (IPXE.LKR) in root
-            if(!virtual_fat_add_sd_file(storage, instance->vfat, "IPXE.LKR", IPXE_BIOS_PATH)) {
-                furi_string_set(instance->status_text, "Failed to add IPXE.LKR");
-                virtual_fat_free(instance->vfat);
-                instance->vfat = NULL;
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
-            }
-
-            // Add UEFI iPXE (BOOTX64.EFI) in EFI/BOOT/
-            if(!virtual_fat_add_file_to_subdir(
-                   storage, instance->vfat, "EFI/BOOT", "BOOTX64.EFI", IPXE_UEFI_PATH)) {
-                furi_string_set(instance->status_text, "Failed to add BOOTX64.EFI");
-                virtual_fat_free(instance->vfat);
-                instance->vfat = NULL;
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
-            }
-
-            // Legacy BIOS boot loads IPXE.LKR with the script and the .B2F writer
-            if(!virtual_fat_set_bios_boot_files(
-                   instance->vfat,
-                   "IPXE.LKR",
-                   bios_cmdline ? B2F_PXE_PATH : "BOOT.CFG",
-                   bios_cmdline ? "BOOT.CFG" : NULL)) {
-                furi_string_set(instance->status_text, "Failed to set up BIOS boot");
-                virtual_fat_free(instance->vfat);
-                instance->vfat = NULL;
-                instance->state = UsbMassStorageStateError;
-                furi_record_close(RECORD_STORAGE);
-                view_dispatcher_switch_to_view(app->view_dispatcher, THIS_SCENE);
-                return true;
+            // Log of the boot, the host's lines come through .B2F/log
+            boot_log_close(instance->boot_log);
+            instance->boot_log = NULL;
+            instance->logged_status[0] = instance->logged_sysinfo[0] = '\0';
+            instance->show_sysinfo = false;
+            if(instance->config->write_log) {
+                instance->boot_log = boot_log_open(storage);
+                usb_mass_storage_log_config(instance);
+                b2f_dir_set_log_callback(instance->b2f, b2f_log_callback, instance);
             }
 
             // 4. Initialize SCSI context
@@ -716,6 +846,14 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
             return true;
         }
 
+        // Back on the system information goes back to the status
+        if(instance->show_sysinfo) {
+            instance->show_sysinfo = false;
+            view_get_model(instance->view);
+            view_commit_model(instance->view, true);
+            return true;
+        }
+
         if(instance->state == UsbMassStorageStateActive) {
             // Stop USB MSC
             instance->state = UsbMassStorageStateStopping;
@@ -739,6 +877,10 @@ bool UsbMassStorage_on_event(void* context, SceneManagerEvent event) {
 
             b2f_dir_free(instance->b2f);
             instance->b2f = NULL;
+
+            boot_log_write(instance->boot_log, "USB stopped");
+            boot_log_close(instance->boot_log);
+            instance->boot_log = NULL;
 
             instance->state = UsbMassStorageStateIdle;
             return false; // Allow back navigation

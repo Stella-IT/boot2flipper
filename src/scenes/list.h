@@ -14,5 +14,10 @@
 
 SCENE_ACTION(Home)
 SCENE_ACTION(About)
+SCENE_ACTION(Settings)
+SCENE_ACTION(Advanced)
+SCENE_ACTION(Profiles)
+SCENE_ACTION(TextEdit)
+SCENE_ACTION(NameEdit)
 SCENE_ACTION(NetworkSettings)
 SCENE_ACTION(UsbMassStorage)

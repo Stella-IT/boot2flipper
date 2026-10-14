@@ -1,5 +1,6 @@
 #include "confirm_input.h"
 #include "key_icons.h"
+#include "tab_button.h"
 #include <gui/elements.h>
 #include <string.h>
 
@@ -8,16 +9,6 @@
 #define TEXT_LINE_HEIGHT 10
 #define TEXT_CAP_HEIGHT  7 // FontSecondary, baseline to the top of capitals
 #define TEXT_LINES       4
-
-// Buttons as stock apps draw them: a box rounded at its inner top corner
-// (the rest is off screen), with the key's icon at the outer side
-#define BUTTON_Y      52
-#define BUTTON_HEIGHT 13
-#define BUTTON_RADIUS 2
-#define BUTTON_TEXT_Y 61
-#define BUTTON_ICON_Y 54 // Icons centered in the visible 12 rows
-#define BUTTON_EDGE   2 // Between the screen edge and the icon
-#define BUTTON_SPACE  3 // Between the icon and the text, and after the text
 
 struct ConfirmInput {
     View* view;
@@ -36,32 +27,13 @@ typedef struct {
 
 // Left: Back key, right: OK key
 static void confirm_input_draw_button(Canvas* canvas, bool right, const char* text) {
-    const int32_t text_width = canvas_string_width(canvas, text);
-    const int32_t icon_width = right ? KEY_ICON_OK_WIDTH : KEY_ICON_BACK_WIDTH;
-    const int32_t width = 1 + BUTTON_EDGE + icon_width + BUTTON_SPACE + text_width + BUTTON_SPACE;
-
-    canvas_set_color(canvas, ColorBlack);
     if(right) {
-        const int32_t x = canvas_width(canvas) + 1 - width;
-        const int32_t icon_x = canvas_width(canvas) - BUTTON_EDGE - icon_width;
-        canvas_draw_rbox(canvas, x, BUTTON_Y, width, BUTTON_HEIGHT, BUTTON_RADIUS);
-        canvas_set_color(canvas, ColorXOR);
-        canvas_draw_str(canvas, x + BUTTON_SPACE, BUTTON_TEXT_Y, text);
-        canvas_draw_xbm(
-            canvas, icon_x, BUTTON_ICON_Y, KEY_ICON_OK_WIDTH, KEY_ICON_OK_HEIGHT, key_icon_ok_bits);
+        tab_button_draw(
+            canvas, true, key_icon_ok_bits, KEY_ICON_OK_WIDTH, KEY_ICON_OK_HEIGHT, text);
     } else {
-        canvas_draw_rbox(canvas, -1, BUTTON_Y, width, BUTTON_HEIGHT, BUTTON_RADIUS);
-        canvas_set_color(canvas, ColorXOR);
-        canvas_draw_xbm(
-            canvas,
-            BUTTON_EDGE,
-            BUTTON_ICON_Y,
-            KEY_ICON_BACK_WIDTH,
-            KEY_ICON_BACK_HEIGHT,
-            key_icon_back_bits);
-        canvas_draw_str(canvas, BUTTON_EDGE + icon_width + BUTTON_SPACE, BUTTON_TEXT_Y, text);
+        tab_button_draw(
+            canvas, false, key_icon_back_bits, KEY_ICON_BACK_WIDTH, KEY_ICON_BACK_HEIGHT, text);
     }
-    canvas_set_color(canvas, ColorBlack);
 }
 
 static void confirm_input_draw_callback(Canvas* canvas, void* _model) {
@@ -78,7 +50,7 @@ static void confirm_input_draw_callback(Canvas* canvas, void* _model) {
         p = end ? end + 1 : p + strlen(p);
     }
     const int32_t block_height = (lines - 1) * TEXT_LINE_HEIGHT + TEXT_CAP_HEIGHT;
-    const int32_t first_baseline = (BUTTON_Y - block_height) / 2 + TEXT_CAP_HEIGHT;
+    const int32_t first_baseline = (TAB_BUTTON_Y - block_height) / 2 + TEXT_CAP_HEIGHT;
 
     for(uint8_t line = 0; line < lines; line++) {
         const char* end = strchr(text, '\n');
