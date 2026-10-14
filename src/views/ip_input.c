@@ -47,7 +47,7 @@ typedef struct {
 } IpInputModel;
 
 static void ip_input_draw_octets(Canvas* canvas, IpInputModel* model) {
-    canvas_set_font(canvas, FontPrimary);
+    canvas_set_font(canvas, FontSecondary);
     for(uint8_t i = 0; i < OCTETS; i++) {
         int32_t x = OCTET_X + i * OCTET_STEP;
         int32_t text_x = x + OCTET_WIDTH / 2;
@@ -83,13 +83,13 @@ static void ip_input_draw_callback(Canvas* canvas, void* _model) {
     canvas_clear(canvas);
     canvas_set_color(canvas, ColorBlack);
 
-    canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, model->header ? model->header : "");
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str(canvas, 2, 9, model->header ? model->header : "");
 
     ip_input_draw_octets(canvas, model);
 
     // Digit keys
-    canvas_set_font(canvas, FontPrimary);
+    canvas_set_font(canvas, FontKeyboard);
     for(uint8_t row = 0; row < KEY_ROWS; row++) {
         int32_t y = KEYS_Y + row * KEY_ROW_STEP;
         for(uint8_t col = 0; col < DIGIT_COLUMNS; col++) {
