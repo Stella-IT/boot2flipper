@@ -57,6 +57,7 @@ If you modify the loader, run `tools/bios_boot/build.sh` to regenerate `src/disk
    2. (Static IP Only) Configure Network Interface other than `auto` (If it is left to `auto`, it will automatically use `net0` interface)
 5. Select `Boot Method`. `Hybrid` (default) boots on both legacy BIOS and UEFI.
    `UEFI` is a spec-compliant GPT disk with a protective MBR, `MBR` is an MBR-only disk.
+   If your UEFI firmware doesn't detect the disk in `Hybrid`, switch to `UEFI`.
 6. If you want to drop to iPXE shell, Set Chainload to `Disabled`.
    1. Else, Set the ChainloadURL to your desired URL.
       The URL keyboard has `.`, `/`, `:`, `-` on the letter layers; the `ABC`/`123`/`abc` key switches to uppercase and digits/symbols. Long press OK types the other case, long press the backspace key clears the text. Press `save` when done.
